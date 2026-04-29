@@ -77,7 +77,7 @@ async def collect_all(cycle_id: int, accounts: list[str]) -> dict:
     api = API()
 
     # تحقق من وجود حسابات twscrape مُعدّة
-    twscrape_accounts = await api.pool.get_all()
+    twscrape_accounts = await api.pool.accounts_info()
     if not twscrape_accounts:
         logger.warning(
             "لا توجد حسابات X في twscrape pool. "
