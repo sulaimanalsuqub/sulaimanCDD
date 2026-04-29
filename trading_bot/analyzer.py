@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,9 @@ load_dotenv()
 BASE_DIR = Path(__file__).parent
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-MAX_TWEETS_IN_PROMPT = int(os.getenv("MAX_TWEETS_IN_PROMPT", 200))
+MAX_TWEETS_IN_PROMPT = int(os.getenv("MAX_TWEETS_IN_PROMPT", 50))
+MAX_TWEETS_FOR_ANALYSIS = int(os.getenv("MAX_TWEETS_FOR_ANALYSIS", 240))
+MAX_TWEET_TEXT_CHARS = int(os.getenv("MAX_TWEET_TEXT_CHARS", 240))
 
 SYSTEM_PROMPT = """\
 أنت محلل سوق كريبتو متخصص. حلل تغريدات حسابات X المرسلة لك.
@@ -35,6 +38,7 @@ SYSTEM_PROMPT = """\
 - ذكر الحسابات المؤثرة التي نشرت الإشارة.
 - عدم اقتراح صفقة إذا البيانات غير كافية.
 - التذكير أن التداول الحقيقي معطل حاليًا.
+- اكتب JSON صالح فقط. لا تستخدم Markdown. لا تضع أسطر جديدة داخل قيم النصوص.
 
 أجب بصيغة JSON فقط بدون Markdown:
 {
@@ -73,6 +77,36 @@ def chunked(items: list[dict], size: int) -> list[list[dict]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _tweet_score(tweet: dict) -> int:
+    return (
+        int(tweet.get("views") or 0)
+        + int(tweet.get("likes") or 0) * 10
+        + int(tweet.get("retweets") or 0) * 25
+        + int(tweet.get("replies") or 0) * 20
+    )
+
+
+def select_tweets_for_analysis(tweets: list[dict]) -> list[dict]:
+    limit = max(1, MAX_TWEETS_FOR_ANALYSIS)
+    if len(tweets) <= limit:
+        return tweets
+
+    ranked = sorted(
+        tweets,
+        key=lambda tweet: (_tweet_score(tweet), str(tweet.get("created_at") or "")),
+        reverse=True,
+    )
+    selected = ranked[:limit]
+    logger.info(
+        f"[Analyzer] تقليل التغريدات للتحليل: {len(tweets)} -> {len(selected)} "
+        "لتقليل استهلاك Claude"
+    )
+    return sorted(
+        selected,
+        key=lambda tweet: (str(tweet.get("created_at") or ""), str(tweet.get("account") or "")),
+    )
+
+
 def build_prompt(tweets: list[dict], *, batch_number: int | None = None) -> str:
     title = "التغريدات"
     if batch_number is not None:
@@ -82,6 +116,8 @@ def build_prompt(tweets: list[dict], *, batch_number: int | None = None) -> str:
     for index, tweet in enumerate(tweets, 1):
         account = tweet.get("account", "unknown")
         text = (tweet.get("text") or tweet.get("content") or "").replace("\n", " ").strip()
+        if len(text) > MAX_TWEET_TEXT_CHARS:
+            text = text[:MAX_TWEET_TEXT_CHARS].rstrip() + "..."
         created_at = tweet.get("created_at") or tweet.get("tweet_created_at") or ""
         url = tweet.get("url") or tweet.get("tweet_url") or ""
         metrics = (
@@ -102,7 +138,31 @@ def parse_claude_response(raw: str) -> dict:
             if not line.strip().startswith("```")
         ).strip()
 
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                data = None
+        else:
+            data = None
+
+        if data is None:
+            logger.warning("Claude أرجع نصًا غير صالح كـ JSON، سيتم حفظ ملخص آمن بدل إسقاط الدورة")
+            return {
+                "market_sentiment": "neutral",
+                "coins": [],
+                "confidence": 0,
+                "summary": raw[:1200],
+                "strong_signals": [],
+                "influential_accounts": [],
+                "reasoning": "Claude أرجع JSON غير صالح، لذلك تم حفظ النص الخام بشكل مختصر.",
+                "trading_note": "التداول الحقيقي معطل حاليًا.",
+            }
+
     sentiment = str(data.get("market_sentiment", "neutral")).lower()
     if sentiment not in ("bullish", "bearish", "neutral"):
         sentiment = "neutral"
@@ -135,6 +195,7 @@ def call_claude(prompt: str, max_tokens: int = 1600) -> dict:
         message = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=max_tokens,
+            temperature=0,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -164,8 +225,12 @@ def analyze_tweets(tweets: list[dict]) -> dict:
     if not tweets:
         raise RuntimeError("لا توجد تغريدات لتحليلها")
 
-    batches = chunked(tweets, max(1, MAX_TWEETS_IN_PROMPT))
-    logger.info(f"[Analyzer] تحليل {len(tweets)} تغريدة عبر {len(batches)} دفعة")
+    selected_tweets = select_tweets_for_analysis(tweets)
+    batches = chunked(selected_tweets, max(1, MAX_TWEETS_IN_PROMPT))
+    logger.info(
+        f"[Analyzer] تحليل {len(selected_tweets)} من أصل {len(tweets)} تغريدة "
+        f"عبر {len(batches)} دفعة"
+    )
 
     partial_results = []
     for index, batch in enumerate(batches, 1):
@@ -173,7 +238,8 @@ def analyze_tweets(tweets: list[dict]) -> dict:
         partial_results.append(call_claude(prompt))
 
     final = combine_batch_results(partial_results)
-    final["tweets_analyzed"] = len(tweets)
+    final["tweets_collected"] = len(tweets)
+    final["tweets_analyzed"] = len(selected_tweets)
     final["batches"] = len(batches)
     return final
 
