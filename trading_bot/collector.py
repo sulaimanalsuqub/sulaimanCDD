@@ -28,9 +28,17 @@ LAST_SEEN_FILE = DATA_DIR / "last_seen_tweets.json"
 
 SOCIALDATA_API_KEY = os.getenv("SOCIALDATA_API_KEY", "")
 TWEETS_PER_ACCOUNT = int(os.getenv("TWEETS_PER_ACCOUNT", 5))
-SOCIALDATA_REQUEST_DELAY_SECONDS = max(
-    0.0,
-    float(os.getenv("SOCIALDATA_REQUEST_DELAY_SECONDS", 1.2)),
+SOCIALDATA_ACCOUNTS_PER_MINUTE = max(
+    1,
+    int(os.getenv("SOCIALDATA_ACCOUNTS_PER_MINUTE", 60)),
+)
+SOCIALDATA_BATCH_WINDOW_SECONDS = max(
+    1.0,
+    float(os.getenv("SOCIALDATA_BATCH_WINDOW_SECONDS", 60)),
+)
+SOCIALDATA_MAX_CONCURRENT = max(
+    1,
+    int(os.getenv("SOCIALDATA_MAX_CONCURRENT", 10)),
 )
 
 SOCIALDATA_BASE_URL = "https://api.socialdata.tools"
@@ -108,6 +116,10 @@ def _retry_after_seconds(resp: httpx.Response, fallback: float) -> float:
         except ValueError:
             pass
     return fallback
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    return [items[index:index + size] for index in range(0, len(items), size)]
 
 
 def normalize_socialdata_tweet(account: str, tweet: dict) -> dict | None:
@@ -224,26 +236,49 @@ async def collect_all(accounts: list[str]) -> tuple[str, list[dict]]:
 
     collected: list[dict] = []
     errors: list[str] = []
+    batches = _chunks(accounts, SOCIALDATA_ACCOUNTS_PER_MINUTE)
 
     async with httpx.AsyncClient(headers=HEADERS, http2=True) as client:
-        for index, account in enumerate(accounts):
-            if index > 0 and SOCIALDATA_REQUEST_DELAY_SECONDS:
-                await asyncio.sleep(SOCIALDATA_REQUEST_DELAY_SECONDS)
+        for batch_index, batch in enumerate(batches, start=1):
+            loop = asyncio.get_running_loop()
+            batch_started_at = loop.time()
+            logger.info(
+                f"SocialData batch {batch_index}/{len(batches)}: "
+                f"{len(batch)} حساب خلال {SOCIALDATA_BATCH_WINDOW_SECONDS:.0f}ث"
+            )
 
-            try:
-                tweets = await fetch_socialdata_account(
-                    client,
-                    account,
-                    TWEETS_PER_ACCOUNT,
-                )
-            except CollectorConfigError:
-                raise
-            except Exception as exc:
-                logger.warning(f"@{account}: فشل SocialData: {exc}")
-                errors.append(str(exc))
-                continue
+            semaphore = asyncio.Semaphore(SOCIALDATA_MAX_CONCURRENT)
 
-            collected.extend(tweets)
+            async def fetch_one(account: str) -> tuple[str, list[dict]]:
+                async with semaphore:
+                    tweets = await fetch_socialdata_account(
+                        client,
+                        account,
+                        TWEETS_PER_ACCOUNT,
+                    )
+                    return account, tweets
+
+            results = await asyncio.gather(
+                *(fetch_one(account) for account in batch),
+                return_exceptions=True,
+            )
+
+            for account, result in zip(batch, results):
+                if isinstance(result, CollectorConfigError):
+                    raise result
+                if isinstance(result, Exception):
+                    logger.warning(f"@{account}: فشل SocialData: {result}")
+                    errors.append(str(result))
+                    continue
+                _, tweets = result
+                collected.extend(tweets)
+
+            if batch_index < len(batches):
+                elapsed = loop.time() - batch_started_at
+                wait = SOCIALDATA_BATCH_WINDOW_SECONDS - elapsed
+                if wait > 0:
+                    logger.info(f"انتظار {wait:.1f}ث قبل دفعة SocialData التالية")
+                    await asyncio.sleep(wait)
 
     if not collected and errors:
         raise CollectorConfigError("; ".join(sorted(set(errors))))
