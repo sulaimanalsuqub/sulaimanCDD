@@ -28,7 +28,6 @@ LAST_SEEN_FILE = DATA_DIR / "last_seen_tweets.json"
 
 SOCIALDATA_API_KEY = os.getenv("SOCIALDATA_API_KEY", "")
 TWEETS_PER_ACCOUNT = int(os.getenv("TWEETS_PER_ACCOUNT", 5))
-SOCIALDATA_MAX_CONCURRENT = max(1, int(os.getenv("SOCIALDATA_MAX_CONCURRENT", 2)))
 SOCIALDATA_REQUEST_DELAY_SECONDS = max(
     0.0,
     float(os.getenv("SOCIALDATA_REQUEST_DELAY_SECONDS", 1.2)),
@@ -223,44 +222,28 @@ async def collect_all(accounts: list[str]) -> tuple[str, list[dict]]:
     if not SOCIALDATA_API_KEY:
         raise CollectorConfigError("SOCIALDATA_API_KEY غير موجود في .env")
 
-    semaphore = asyncio.Semaphore(SOCIALDATA_MAX_CONCURRENT)
-    request_lock = asyncio.Lock()
-    last_request_at = 0.0
     collected: list[dict] = []
     errors: list[str] = []
 
     async with httpx.AsyncClient(headers=HEADERS, http2=True) as client:
-        async def bounded_fetch(account: str) -> tuple[str, list[dict]]:
-            nonlocal last_request_at
-            async with semaphore:
-                async with request_lock:
-                    loop = asyncio.get_running_loop()
-                    elapsed = loop.time() - last_request_at
-                    wait = SOCIALDATA_REQUEST_DELAY_SECONDS - elapsed
-                    if wait > 0:
-                        await asyncio.sleep(wait)
-                    last_request_at = loop.time()
+        for index, account in enumerate(accounts):
+            if index > 0 and SOCIALDATA_REQUEST_DELAY_SECONDS:
+                await asyncio.sleep(SOCIALDATA_REQUEST_DELAY_SECONDS)
 
-                return account, await fetch_socialdata_account(
+            try:
+                tweets = await fetch_socialdata_account(
                     client,
                     account,
                     TWEETS_PER_ACCOUNT,
                 )
+            except CollectorConfigError:
+                raise
+            except Exception as exc:
+                logger.warning(f"@{account}: فشل SocialData: {exc}")
+                errors.append(str(exc))
+                continue
 
-        results = await asyncio.gather(
-            *(bounded_fetch(account) for account in accounts),
-            return_exceptions=True,
-        )
-
-    for account, result in zip(accounts, results):
-        if isinstance(result, CollectorConfigError):
-            errors.append(str(result))
-            continue
-        if isinstance(result, Exception):
-            logger.warning(f"@{account}: فشل SocialData: {result}")
-            continue
-        _, tweets = result
-        collected.extend(tweets)
+            collected.extend(tweets)
 
     if not collected and errors:
         raise CollectorConfigError("; ".join(sorted(set(errors))))
