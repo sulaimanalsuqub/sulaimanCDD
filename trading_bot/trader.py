@@ -26,6 +26,7 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
 USE_FUTURES        = os.getenv("BINANCE_FUTURES", "false").lower() == "true"
+TRADING_ENABLED    = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 MAX_RETRIES        = 3
 RETRY_DELAY_SEC    = 2
 
@@ -297,6 +298,13 @@ def run(cycle_id: int) -> list[dict]:
     active = [d for d in decisions if d["action"] in ("buy", "sell")]
     if not active:
         logger.info("[Trader] جميع القرارات hold — لا صفقات تُنفَّذ")
+        return []
+
+    if not TRADING_ENABLED:
+        logger.warning(
+            "[Trader] التداول الحقيقي معطل TRADING_ENABLED=false — "
+            f"تخطي تنفيذ {len(active)} قرار نشط"
+        )
         return []
 
     try:

@@ -26,6 +26,10 @@ BASE_URL = "https://api.twitterapi.io"
 HEADERS  = {"X-API-Key": TWITTER_API_KEY, "Accept": "application/json"}
 
 
+class CollectorConfigError(RuntimeError):
+    """خطأ يمنع الجمع من الاستمرار ويحتاج إجراء خارجي."""
+
+
 def load_accounts() -> list[str]:
     if not ACCOUNTS_FILE.exists():
         logger.error(f"ملف الحسابات غير موجود: {ACCOUNTS_FILE}")
@@ -33,7 +37,7 @@ def load_accounts() -> list[str]:
     accounts = []
     for line in ACCOUNTS_FILE.read_text(encoding="utf-8").splitlines():
         handle = line.strip().lstrip("@")
-        if handle and not handle.startswith("#"):
+        if handle and not handle.startswith("#") and handle.lower() != "handle":
             accounts.append(handle)
     if not accounts:
         logger.warning("accounts.txt موجود لكنه فارغ!")
@@ -70,8 +74,16 @@ async def fetch_user_tweets(
                 continue
 
             if resp.status_code == 401:
-                logger.error("TWITTER_API_KEY غير صحيح — أوقف الجمع")
-                return []
+                raise CollectorConfigError("TWITTER_API_KEY غير صحيح أو غير مصرح")
+
+            if resp.status_code == 402:
+                try:
+                    message = resp.json().get("message", "")
+                except Exception:
+                    message = resp.text[:120]
+                raise CollectorConfigError(
+                    f"رصيد twitterapi.io غير كاف لجمع التغريدات: {message}"
+                )
 
             if resp.status_code == 404:
                 logger.debug(f"@{account}: غير موجود (404)")
@@ -125,6 +137,8 @@ async def collect_all(cycle_id: int, accounts: list[str]) -> dict:
 
     for result in results:
         if isinstance(result, Exception):
+            if isinstance(result, CollectorConfigError):
+                raise result
             stats["errors"] += 1
             continue
 
@@ -174,7 +188,9 @@ def run(cycle_id: int) -> dict:
     )
 
     if stats["saved"] == 0 and stats["fetched"] == 0:
-        raise RuntimeError("لم تُجلب أي تغريدات — تحقق من TWITTER_API_KEY")
+        raise RuntimeError(
+            "لم تُجلب أي تغريدات — تحقق من رصيد twitterapi.io وصلاحية TWITTER_API_KEY"
+        )
 
     return stats
 

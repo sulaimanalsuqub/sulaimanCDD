@@ -25,6 +25,8 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
 MIN_CONFIDENCE     = int(os.getenv("MIN_CONFIDENCE", 60))
+TRADING_ENABLED    = os.getenv("TRADING_ENABLED", "false").lower() == "true"
+PAPER_CAPITAL_USDT = float(os.getenv("PAPER_CAPITAL_USDT", "1000"))
 
 # نسبة رأس المال لكل صفقة بحسب مستوى الثقة
 CAPITAL_TIERS = [
@@ -178,12 +180,19 @@ def run(cycle_id: int) -> list[dict]:
     if not analysis:
         raise RuntimeError("لا يوجد تحليل محفوظ — شغّل analyzer.py أولاً")
 
-    try:
-        client  = get_binance_client()
-        capital = get_available_capital(client)
-    except RuntimeError as e:
-        logger.error(f"[Decision] {e}")
-        raise
+    if TRADING_ENABLED:
+        try:
+            client  = get_binance_client()
+            capital = get_available_capital(client)
+        except RuntimeError as e:
+            logger.error(f"[Decision] {e}")
+            raise
+    else:
+        capital = PAPER_CAPITAL_USDT
+        logger.warning(
+            "[Decision] التداول الحقيقي معطل TRADING_ENABLED=false — "
+            f"استخدام رأس مال تجريبي {capital:.2f} USDT"
+        )
 
     # تحويل RealDictRow إلى dict عادي
     analysis_dict = dict(analysis)

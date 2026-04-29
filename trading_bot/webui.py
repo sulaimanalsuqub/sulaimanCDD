@@ -6,6 +6,7 @@ webui.py — واجهة ويب لمراقبة نظام التداول
 import json
 import os
 import sys
+from decimal import Decimal
 from datetime import datetime, timezone
 
 import uvicorn
@@ -28,6 +29,18 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
 app = FastAPI(title="نظام التداول الذكي", docs_url=None, redoc_url=None)
 
 WEBUI_PORT = int(os.getenv("WEBUI_PORT", 8080))
+
+
+def jsonable(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, list):
+        return [jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: jsonable(v) for k, v in value.items()}
+    return value
 
 
 # ─── HTML الرئيسي ─────────────────────────────────────────────────────────────
@@ -394,11 +407,7 @@ def dashboard():
 def api_stats():
     try:
         stats = db.get_stats()
-        result = dict(stats)
-        # تحويل datetime إلى string
-        for k, v in result.items():
-            if hasattr(v, "isoformat"):
-                result[k] = v.isoformat()
+        result = jsonable(dict(stats))
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/stats: {e}")
@@ -411,10 +420,7 @@ def api_analysis():
         analysis = db.get_latest_analysis()
         if not analysis:
             return JSONResponse({})
-        result = dict(analysis)
-        for k, v in result.items():
-            if hasattr(v, "isoformat"):
-                result[k] = v.isoformat()
+        result = jsonable(dict(analysis))
         # coins JSONB → list
         if isinstance(result.get("coins"), str):
             result["coins"] = json.loads(result["coins"])
@@ -430,11 +436,7 @@ def api_decisions():
         decisions = db.get_latest_decisions()
         result = []
         for d in decisions:
-            row = dict(d)
-            for k, v in row.items():
-                if hasattr(v, "isoformat"):
-                    row[k] = v.isoformat()
-            result.append(row)
+            result.append(jsonable(dict(d)))
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/decisions: {e}")
@@ -454,13 +456,7 @@ def api_trades():
             rows = cur.fetchall()
         result = []
         for r in rows:
-            row = dict(r)
-            for k, v in row.items():
-                if hasattr(v, "isoformat"):
-                    row[k] = v.isoformat()
-                elif hasattr(v, "__float__"):
-                    row[k] = float(v)
-            result.append(row)
+            result.append(jsonable(dict(r)))
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/trades: {e}")
@@ -470,6 +466,15 @@ def api_trades():
 @app.get("/api/balance")
 def api_balance():
     try:
+        if os.getenv("TRADING_ENABLED", "false").lower() != "true":
+            return JSONResponse({
+                "paper_mode": True,
+                "usdt_free": float(os.getenv("PAPER_CAPITAL_USDT", "1000")),
+                "usdt_locked": 0,
+                "balances": [],
+                "message": "التداول الحقيقي معطل TRADING_ENABLED=false",
+            })
+
         api_key    = os.getenv("BINANCE_API_KEY", "")
         api_secret = os.getenv("BINANCE_SECRET_KEY", "")
         if not api_key or not api_secret:
@@ -515,11 +520,7 @@ def api_cycles():
             rows = cur.fetchall()
         result = []
         for r in rows:
-            row = dict(r)
-            for k, v in row.items():
-                if hasattr(v, "isoformat"):
-                    row[k] = v.isoformat()
-            result.append(row)
+            result.append(jsonable(dict(r)))
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/cycles: {e}")
