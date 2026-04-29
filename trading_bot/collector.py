@@ -28,7 +28,11 @@ LAST_SEEN_FILE = DATA_DIR / "last_seen_tweets.json"
 
 SOCIALDATA_API_KEY = os.getenv("SOCIALDATA_API_KEY", "")
 TWEETS_PER_ACCOUNT = int(os.getenv("TWEETS_PER_ACCOUNT", 5))
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", 5))
+SOCIALDATA_MAX_CONCURRENT = max(1, int(os.getenv("SOCIALDATA_MAX_CONCURRENT", 2)))
+SOCIALDATA_REQUEST_DELAY_SECONDS = max(
+    0.0,
+    float(os.getenv("SOCIALDATA_REQUEST_DELAY_SECONDS", 1.2)),
+)
 
 SOCIALDATA_BASE_URL = "https://api.socialdata.tools"
 HEADERS = {
@@ -95,6 +99,16 @@ def _iso_datetime(value: Any) -> str | None:
 
 def _tweet_url(account: str, tweet_id: str) -> str:
     return f"https://x.com/{account}/status/{tweet_id}"
+
+
+def _retry_after_seconds(resp: httpx.Response, fallback: float) -> float:
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(float(retry_after), fallback)
+        except ValueError:
+            pass
+    return fallback
 
 
 def normalize_socialdata_tweet(account: str, tweet: dict) -> dict | None:
@@ -193,7 +207,7 @@ async def fetch_socialdata_account(
 
         if resp.status_code in (429, 500):
             if attempt < retries:
-                wait = 3 * (attempt + 1)
+                wait = _retry_after_seconds(resp, 30.0 * (attempt + 1))
                 logger.warning(f"@{account}: SocialData HTTP {resp.status_code} — انتظار {wait}ث")
                 await asyncio.sleep(wait)
                 continue
@@ -209,13 +223,24 @@ async def collect_all(accounts: list[str]) -> tuple[str, list[dict]]:
     if not SOCIALDATA_API_KEY:
         raise CollectorConfigError("SOCIALDATA_API_KEY غير موجود في .env")
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    semaphore = asyncio.Semaphore(SOCIALDATA_MAX_CONCURRENT)
+    request_lock = asyncio.Lock()
+    last_request_at = 0.0
     collected: list[dict] = []
     errors: list[str] = []
 
     async with httpx.AsyncClient(headers=HEADERS, http2=True) as client:
         async def bounded_fetch(account: str) -> tuple[str, list[dict]]:
+            nonlocal last_request_at
             async with semaphore:
+                async with request_lock:
+                    loop = asyncio.get_running_loop()
+                    elapsed = loop.time() - last_request_at
+                    wait = SOCIALDATA_REQUEST_DELAY_SECONDS - elapsed
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    last_request_at = loop.time()
+
                 return account, await fetch_socialdata_account(
                     client,
                     account,
