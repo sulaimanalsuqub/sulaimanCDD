@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 from loguru import logger
+from binance.client import Client as BinanceClient
+from binance.exceptions import BinanceAPIException
 
 import database as db
 
@@ -69,7 +71,12 @@ HTML = """<!DOCTYPE html>
 <main class="p-6 space-y-6 max-w-7xl mx-auto">
 
   <!-- بطاقات الإحصائيات -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+    <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+      <p class="text-slate-400 text-sm mb-1">رصيد USDT</p>
+      <p id="balance-usdt" class="text-2xl font-bold text-yellow-400">—</p>
+      <p id="balance-locked" class="text-xs text-slate-500 mt-1">محجوز: —</p>
+    </div>
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
       <p class="text-slate-400 text-sm mb-1">إجمالي الصفقات</p>
       <p id="stat-trades" class="text-3xl font-bold text-white">—</p>
@@ -79,7 +86,7 @@ HTML = """<!DOCTYPE html>
       <p id="stat-pnl" class="text-3xl font-bold">—</p>
     </div>
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
-      <p class="text-slate-400 text-sm mb-1">تغريدات (5 دقائق)</p>
+      <p class="text-slate-400 text-sm mb-1">تغريدات محللة</p>
       <p id="stat-tweets" class="text-3xl font-bold text-cyan-400">—</p>
     </div>
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
@@ -342,8 +349,24 @@ async function loadCycles() {
   } catch(e) { console.error('cycles error', e); }
 }
 
+async function loadBalance() {
+  try {
+    const r = await fetch('/api/balance');
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('balance-usdt').textContent   = 'خطأ';
+      document.getElementById('balance-locked').textContent = d.error.substring(0, 30);
+      return;
+    }
+    const free   = parseFloat(d.usdt_free   || 0);
+    const locked = parseFloat(d.usdt_locked || 0);
+    document.getElementById('balance-usdt').textContent   = free.toFixed(2) + ' $';
+    document.getElementById('balance-locked').textContent = 'محجوز: ' + locked.toFixed(2) + ' $';
+  } catch(e) { console.error('balance error', e); }
+}
+
 async function refresh() {
-  await Promise.all([loadStats(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles()]);
+  await Promise.all([loadStats(), loadBalance(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles()]);
 }
 
 // تحديث تلقائي
@@ -442,6 +465,41 @@ def api_trades():
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/trades: {e}")
         return JSONResponse([], status_code=500)
+
+
+@app.get("/api/balance")
+def api_balance():
+    try:
+        api_key    = os.getenv("BINANCE_API_KEY", "")
+        api_secret = os.getenv("BINANCE_SECRET_KEY", "")
+        if not api_key or not api_secret:
+            return JSONResponse({"error": "مفاتيح Binance غير مضافة"})
+
+        client = BinanceClient(api_key, api_secret)
+        account = client.get_account()
+
+        balances = {b["asset"]: b for b in account.get("balances", [])}
+
+        usdt = balances.get("USDT", {})
+        result = {
+            "usdt_free":   float(usdt.get("free", 0)),
+            "usdt_locked": float(usdt.get("locked", 0)),
+            "balances": [
+                {"asset": b["asset"],
+                 "free":  float(b["free"]),
+                 "locked": float(b["locked"])}
+                for b in account.get("balances", [])
+                if float(b["free"]) > 0 or float(b["locked"]) > 0
+            ]
+        }
+        return JSONResponse(result)
+
+    except BinanceAPIException as e:
+        logger.error(f"[WebUI] خطأ Binance في /api/balance: {e}")
+        return JSONResponse({"error": f"Binance: {e.message}"})
+    except Exception as e:
+        logger.error(f"[WebUI] خطأ في /api/balance: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/cycles")
