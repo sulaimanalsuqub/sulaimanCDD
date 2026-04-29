@@ -166,6 +166,32 @@ EOF
 systemctl daemon-reload
 success "تم إنشاء trading-bot.service"
 
+# ─── 11. إنشاء systemd service للواجهة ──────────────────────────────────────
+log "إنشاء systemd service للواجهة الويب..."
+
+cat > /etc/systemd/system/trading-webui.service << EOF
+[Unit]
+Description=واجهة الويب — نظام التداول الذكي
+After=network.target postgresql.service trading-bot.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${BOT_DIR}
+ExecStart=${VENV_DIR}/bin/uvicorn webui:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:${BOT_DIR}/bot.log
+StandardError=append:${BOT_DIR}/bot.log
+EnvironmentFile=${BOT_DIR}/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+success "تم إنشاء trading-webui.service (port 8080)"
+
 # ─── ملخص التثبيت ─────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════════"
@@ -185,15 +211,21 @@ echo "     source ${VENV_DIR}/bin/activate"
 echo "     twscrape add_accounts accounts_auth.txt --cookies"
 echo "     twscrape login_all"
 echo ""
-echo "  4) شغّل البوت:"
-echo "     systemctl start trading-bot"
-echo "     systemctl enable trading-bot   # للتشغيل التلقائي"
+echo "  4) شغّل البوت والواجهة:"
+echo "     systemctl start trading-bot trading-webui"
+echo "     systemctl enable trading-bot trading-webui"
 echo ""
 echo "  5) تابع السجلات:"
 echo "     tail -f ${BOT_DIR}/bot.log"
 echo "     journalctl -u trading-bot -f"
 echo ""
-echo "  6) لوحة المتابعة:"
+echo "  6) الواجهة الويب:"
+echo "     http://5.78.66.14:8080"
+echo ""
+echo "  7) نشر التحديثات من GitHub:"
+echo "     bash ${BOT_DIR}/deploy.sh"
+echo ""
+echo "  8) لوحة Terminal:"
 echo "     source ${VENV_DIR}/bin/activate && python3 ${BOT_DIR}/dashboard.py"
 echo ""
 echo "  كلمة مرور PostgreSQL: ${DB_PASS}"
