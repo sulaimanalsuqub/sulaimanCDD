@@ -95,6 +95,8 @@ async def fetch_user_tweets(
         except httpx.TimeoutException:
             logger.warning(f"@{account}: انتهت المهلة")
             return []
+        except CollectorConfigError:
+            raise
         except Exception as e:
             logger.error(f"خطأ في @{account}: {e}")
             return []
@@ -125,15 +127,20 @@ async def collect_all(cycle_id: int, accounts: list[str]) -> dict:
     stats = {"fetched": 0, "saved": 0, "skipped": 0, "errors": 0}
 
     async with httpx.AsyncClient(headers=HEADERS, http2=True) as client:
+        first_account = accounts[0]
+        first_tweets = await fetch_user_tweets(
+            client, first_account, TWEETS_PER_ACCOUNT
+        )
 
         async def bounded_fetch(account: str):
             async with semaphore:
                 return account, await fetch_user_tweets(client, account, TWEETS_PER_ACCOUNT)
 
         results = await asyncio.gather(
-            *[bounded_fetch(acc) for acc in accounts],
+            *[bounded_fetch(acc) for acc in accounts[1:]],
             return_exceptions=True,
         )
+        results.insert(0, (first_account, first_tweets))
 
     for result in results:
         if isinstance(result, Exception):

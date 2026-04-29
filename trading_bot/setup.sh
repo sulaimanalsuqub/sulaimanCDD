@@ -157,8 +157,8 @@ WorkingDirectory=${BOT_DIR}
 ExecStart=${VENV_DIR}/bin/python3 ${BOT_DIR}/scheduler.py
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:${BOT_DIR}/bot.log
-StandardError=append:${BOT_DIR}/bot.log
+StandardOutput=journal
+StandardError=journal
 EnvironmentFile=${BOT_DIR}/.env
 
 [Install]
@@ -183,8 +183,8 @@ WorkingDirectory=${BOT_DIR}
 ExecStart=${VENV_DIR}/bin/uvicorn webui:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=10
-StandardOutput=append:${BOT_DIR}/bot.log
-StandardError=append:${BOT_DIR}/bot.log
+StandardOutput=journal
+StandardError=journal
 EnvironmentFile=${BOT_DIR}/.env
 
 [Install]
