@@ -94,9 +94,10 @@ def calculate_quantity(client: BinanceClient, symbol: str,
 def execute_spot_order(client: BinanceClient, symbol: str,
                        side: str, quantity: float) -> dict:
     """ينفذ أمر Spot Market."""
-    return client.order_market(
+    return client.create_order(
         symbol=symbol,
-        side=side,          # BUY أو SELL
+        side=side,
+        type="MARKET",
         quantity=quantity,
     )
 
