@@ -84,13 +84,24 @@ CREATE TABLE IF NOT EXISTS cycles (
     id           SERIAL PRIMARY KEY,
     started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    status       VARCHAR(20)  NOT NULL DEFAULT 'running'
-                    CHECK (status IN ('running', 'completed', 'failed')),
+    status       VARCHAR(40)  NOT NULL DEFAULT 'running',
     error        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cycles_started_at ON cycles (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cycles_status     ON cycles (status);
+
+ALTER TABLE cycles DROP CONSTRAINT IF EXISTS cycles_status_check;
+ALTER TABLE cycles ALTER COLUMN status TYPE VARCHAR(40);
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS collector_status VARCHAR(30);
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS analyzer_status  VARCHAR(30);
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS tweets_count     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS tweets_file_path TEXT;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS analysis_result  TEXT;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS error_message    TEXT;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS collected_at     TIMESTAMPTZ;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS analyzed_at      TIMESTAMPTZ;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS finished_at      TIMESTAMPTZ;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- جدول التغريدات: يخزن التغريدات المجمعة من حسابات X
@@ -103,6 +114,14 @@ CREATE TABLE IF NOT EXISTS tweets (
     content      TEXT        NOT NULL,
     collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE tweets ALTER COLUMN tweet_id TYPE VARCHAR(80);
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS tweet_created_at TIMESTAMPTZ;
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS tweet_url        TEXT;
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS likes            INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS retweets         INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS replies          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tweets ADD COLUMN IF NOT EXISTS views            INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_tweets_cycle_id     ON tweets (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_tweets_collected_at ON tweets (collected_at DESC);
@@ -187,7 +206,9 @@ def create_cycle() -> int:
     """ينشئ دورة جديدة ويُعيد الـ ID."""
     with get_cursor() as cur:
         cur.execute(
-            "INSERT INTO cycles (status) VALUES ('running') RETURNING id"
+            """INSERT INTO cycles (status, collector_status, analyzer_status)
+               VALUES ('running', 'pending', 'pending')
+               RETURNING id"""
         )
         row = cur.fetchone()
         cycle_id = row["id"]
@@ -195,40 +216,102 @@ def create_cycle() -> int:
     return cycle_id
 
 
-def complete_cycle(cycle_id: int) -> None:
-    """يُعلم الدورة باكتمالها."""
+def update_cycle(
+    cycle_id: int,
+    *,
+    status: str | None = None,
+    collector_status: str | None = None,
+    analyzer_status: str | None = None,
+    tweets_count: int | None = None,
+    tweets_file_path: str | None = None,
+    analysis_result: str | None = None,
+    error_message: str | None = None,
+    mark_collected: bool = False,
+    mark_analyzed: bool = False,
+    mark_finished: bool = False,
+) -> None:
+    """يحدث حقول دورة واحدة بدون حذف بيانات قديمة."""
+    assignments = []
+    values = []
+    fields = {
+        "status": status,
+        "collector_status": collector_status,
+        "analyzer_status": analyzer_status,
+        "tweets_count": tweets_count,
+        "tweets_file_path": tweets_file_path,
+        "analysis_result": analysis_result,
+        "error_message": error_message,
+        "error": error_message,
+    }
+    for column, value in fields.items():
+        if value is not None:
+            assignments.append(f"{column} = %s")
+            values.append(value)
+
+    if mark_collected:
+        assignments.append("collected_at = NOW()")
+    if mark_analyzed:
+        assignments.append("analyzed_at = NOW()")
+    if mark_finished:
+        assignments.append("finished_at = NOW()")
+        assignments.append("completed_at = NOW()")
+
+    if not assignments:
+        return
+
+    values.append(cycle_id)
     with get_cursor() as cur:
         cur.execute(
-            """UPDATE cycles
-               SET status = 'completed', completed_at = NOW()
-               WHERE id = %s""",
-            (cycle_id,),
+            f"UPDATE cycles SET {', '.join(assignments)} WHERE id = %s",
+            tuple(values),
         )
+
+
+def complete_cycle(cycle_id: int) -> None:
+    """يُعلم الدورة باكتمالها."""
+    update_cycle(cycle_id, status="completed", mark_finished=True)
     logger.info(f"اكتملت الدورة #{cycle_id}")
 
 
 def fail_cycle(cycle_id: int, error: str) -> None:
     """يُسجّل فشل الدورة مع رسالة الخطأ."""
-    with get_cursor() as cur:
-        cur.execute(
-            """UPDATE cycles
-               SET status = 'failed', completed_at = NOW(), error = %s
-               WHERE id = %s""",
-            (error, cycle_id),
-        )
+    update_cycle(
+        cycle_id,
+        status="failed",
+        error_message=error,
+        mark_finished=True,
+    )
     logger.warning(f"فشلت الدورة #{cycle_id}: {error}")
 
 
-def save_tweet(cycle_id: int, account: str, tweet_id: str, content: str) -> bool:
+def save_tweet(
+    cycle_id: int,
+    account: str,
+    tweet_id: str,
+    content: str,
+    *,
+    created_at=None,
+    url: str | None = None,
+    likes: int = 0,
+    retweets: int = 0,
+    replies: int = 0,
+    views: int = 0,
+) -> bool:
     """يحفظ تغريدة جديدة — يتجاهل المكررة. يُعيد True إذا حُفظت."""
     try:
         with get_cursor() as cur:
             cur.execute(
-                """INSERT INTO tweets (cycle_id, account, tweet_id, content)
-                   VALUES (%s, %s, %s, %s)
+                """INSERT INTO tweets (
+                       cycle_id, account, tweet_id, content, tweet_created_at,
+                       tweet_url, likes, retweets, replies, views
+                   )
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (tweet_id) DO NOTHING
                    RETURNING id""",
-                (cycle_id, account, tweet_id, content),
+                (
+                    cycle_id, account, tweet_id, content, created_at,
+                    url, likes, retweets, replies, views,
+                ),
             )
             return cur.fetchone() is not None
     except Exception as e:
@@ -249,6 +332,20 @@ def get_recent_tweets(minutes: int = 5) -> list[dict]:
         return cur.fetchall()
 
 
+def get_cycle_tweets(cycle_id: int) -> list[dict]:
+    """يجلب تغريدات دورة محددة للتحليل أو العرض."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT account, tweet_id, content, tweet_created_at, tweet_url,
+                      likes, retweets, replies, views, collected_at
+               FROM   tweets
+               WHERE  cycle_id = %s
+               ORDER  BY collected_at ASC""",
+            (cycle_id,),
+        )
+        return cur.fetchall()
+
+
 def save_analysis(cycle_id: int, sentiment: str, coins: list,
                   confidence: int, reasoning: str) -> int:
     """يحفظ نتيجة تحليل Claude ويُعيد الـ ID."""
@@ -263,6 +360,20 @@ def save_analysis(cycle_id: int, sentiment: str, coins: list,
         return cur.fetchone()["id"]
 
 
+def save_cycle_analysis_result(cycle_id: int, result: dict) -> None:
+    """يحفظ نتيجة التحليل النهائية داخل سجل الدورة نفسه."""
+    import json
+
+    update_cycle(
+        cycle_id,
+        analysis_result=json.dumps(result, ensure_ascii=False),
+        analyzer_status="completed",
+        status="analyzed",
+        mark_analyzed=True,
+        mark_finished=True,
+    )
+
+
 def get_latest_analysis() -> dict | None:
     """يجلب آخر تحليل محفوظ."""
     with get_cursor() as cur:
@@ -270,6 +381,39 @@ def get_latest_analysis() -> dict | None:
             """SELECT * FROM analyses ORDER BY analyzed_at DESC LIMIT 1"""
         )
         return cur.fetchone()
+
+
+def get_current_cycle() -> dict | None:
+    """يجلب آخر دورة بكل حقول حالة سير العمل."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT id AS cycle_id, status, collector_status, analyzer_status,
+                      tweets_count, tweets_file_path, analysis_result,
+                      COALESCE(error_message, error) AS error_message,
+                      started_at, collected_at, analyzed_at, finished_at,
+                      completed_at
+               FROM   cycles
+               ORDER  BY started_at DESC
+               LIMIT  1"""
+        )
+        return cur.fetchone()
+
+
+def get_cycles(limit: int = 15) -> list[dict]:
+    """يجلب سجل الدورات الجديد مع توافق مع الحقول القديمة."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT id AS cycle_id, id, status, collector_status, analyzer_status,
+                      tweets_count, tweets_file_path, analysis_result,
+                      COALESCE(error_message, error) AS error_message,
+                      started_at, collected_at, analyzed_at, finished_at,
+                      completed_at
+               FROM   cycles
+               ORDER  BY started_at DESC
+               LIMIT  %s""",
+            (limit,),
+        )
+        return cur.fetchall()
 
 
 def save_decision(cycle_id: int, coin: str, action: str,
@@ -294,7 +438,7 @@ def get_latest_decisions() -> list[dict]:
                JOIN   cycles c ON c.id = d.cycle_id
                WHERE  c.id = (
                    SELECT id FROM cycles
-                   WHERE  status != 'failed'
+                   WHERE  status NOT IN ('failed', 'collector_failed', 'analyzer_failed')
                    ORDER  BY started_at DESC
                    LIMIT  1
                )
@@ -328,8 +472,8 @@ def get_stats() -> dict:
     with get_cursor() as cur:
         cur.execute("""
             SELECT
-                (SELECT COUNT(*) FROM tweets
-                 WHERE collected_at >= NOW() - INTERVAL '5 minutes') AS recent_tweets,
+                (SELECT COALESCE(tweets_count, 0)
+                 FROM cycles ORDER BY started_at DESC LIMIT 1) AS recent_tweets,
                 (SELECT COUNT(*) FROM trades WHERE status = 'filled')  AS total_trades,
                 (SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'filled') AS total_pnl,
                 (SELECT started_at FROM cycles ORDER BY started_at DESC LIMIT 1) AS last_cycle,

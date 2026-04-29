@@ -1,5 +1,5 @@
 """
-scheduler.py — المجدول الرئيسي: يشغّل المراحل الأربع كل N دقائق
+scheduler.py — المجدول الرئيسي: جمع تغريدات X ثم تحليلها عبر Claude.
 تشغيل: python scheduler.py
 """
 
@@ -15,8 +15,6 @@ from loguru import logger
 import database as db
 import collector
 import analyzer
-import decision
-import trader
 
 load_dotenv()
 
@@ -33,12 +31,11 @@ INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", 5))
 def run_cycle() -> None:
     """
     ينفذ دورة كاملة بالترتيب:
-    1. Collector  → جمع التغريدات
+    1. Collector  → جمع التغريدات وحفظ JSONL
     2. Analyzer   → تحليل Claude API
-    3. Decision   → اتخاذ القرارات
-    4. Trader     → تنفيذ الصفقات
 
     إذا فشلت أي مرحلة → يُسجَّل الخطأ ويُكمل للدورة التالية.
+    لا ينفذ أي تداول حقيقي.
     """
     cycle_id = db.create_cycle()
     logger.info("=" * 60)
@@ -48,15 +45,27 @@ def run_cycle() -> None:
     # ── المرحلة 1: جمع التغريدات ──────────────────────────────────────────────
     try:
         stats = collector.run(cycle_id)
-        logger.info(f"✓ المرحلة 1 (Collector) — محفوظ: {stats['saved']}")
+        logger.info(
+            f"✓ المرحلة 1 (Collector) — محفوظ: {stats['saved']} | "
+            f"ملف: {stats.get('tweets_file_path')}"
+        )
+    except collector.NoNewTweets as e:
+        logger.warning(f"لا توجد تغريدات جديدة في الدورة #{cycle_id}: {e}")
+        return
     except Exception as e:
         logger.error(f"✗ المرحلة 1 (Collector) فشلت: {e}")
-        db.fail_cycle(cycle_id, f"Collector: {e}")
+        db.update_cycle(
+            cycle_id,
+            status="collector_failed",
+            collector_status="failed",
+            error_message=f"Collector: {e}",
+            mark_finished=True,
+        )
         return
 
     # ── المرحلة 2: التحليل ────────────────────────────────────────────────────
     try:
-        result = analyzer.run(cycle_id)
+        result = analyzer.run(cycle_id, stats.get("tweets_file_path"))
         logger.info(
             f"✓ المرحلة 2 (Analyzer) — "
             f"{result.get('market_sentiment')} | "
@@ -64,33 +73,16 @@ def run_cycle() -> None:
         )
     except Exception as e:
         logger.error(f"✗ المرحلة 2 (Analyzer) فشلت: {e}")
-        db.fail_cycle(cycle_id, f"Analyzer: {e}")
-        return
-
-    # ── المرحلة 3: القرارات ───────────────────────────────────────────────────
-    try:
-        decisions = decision.run(cycle_id)
-        active = [d for d in decisions if d["action"] != "hold"]
-        logger.info(
-            f"✓ المرحلة 3 (Decision) — "
-            f"إجمالي: {len(decisions)} | نشط: {len(active)}"
+        db.update_cycle(
+            cycle_id,
+            status="analyzer_failed",
+            analyzer_status="failed",
+            error_message=f"Analyzer: {e}",
+            mark_finished=True,
         )
-    except Exception as e:
-        logger.error(f"✗ المرحلة 3 (Decision) فشلت: {e}")
-        db.fail_cycle(cycle_id, f"Decision: {e}")
         return
 
-    # ── المرحلة 4: التنفيذ ────────────────────────────────────────────────────
-    try:
-        trades = trader.run(cycle_id)
-        logger.info(f"✓ المرحلة 4 (Trader) — صفقات منفذة: {len(trades)}")
-    except Exception as e:
-        logger.error(f"✗ المرحلة 4 (Trader) فشلت: {e}")
-        db.fail_cycle(cycle_id, f"Trader: {e}")
-        return
-
-    db.complete_cycle(cycle_id)
-    logger.success(f"اكتملت الدورة #{cycle_id} بنجاح ✓")
+    logger.success(f"اكتملت دورة الجمع والتحليل #{cycle_id} بنجاح ✓")
     logger.info("=" * 60)
 
 

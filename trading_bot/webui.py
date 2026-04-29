@@ -109,6 +109,53 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- حالة الدورة الحالية -->
+  <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5">
+      <h2 class="text-lg font-bold flex items-center gap-2">
+        <span>🔎</span> حالة دورة جمع التغريدات والتحليل
+      </h2>
+      <div class="flex items-center gap-2">
+        <span id="current-cycle-id" class="font-mono text-slate-300">—</span>
+        <span id="current-cycle-status">—</span>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-5">
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">الحالة الحالية</p>
+        <p id="current-cycle-status-text" class="text-sm font-bold text-white">—</p>
+      </div>
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">جمع التغريدات</p>
+        <p id="current-collector-status" class="text-sm font-mono text-slate-300">—</p>
+      </div>
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">تحليل Claude</p>
+        <p id="current-analyzer-status" class="text-sm font-mono text-slate-300">—</p>
+      </div>
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">عدد التغريدات</p>
+        <p id="current-tweets-count" class="text-xl font-bold text-cyan-300">—</p>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">ملف التغريدات</p>
+        <p id="current-tweets-file" class="text-xs font-mono text-slate-300 break-all">—</p>
+      </div>
+      <div class="bg-slate-900 rounded-lg p-3 border border-slate-700">
+        <p class="text-xs text-slate-500 mb-1">الخطأ</p>
+        <p id="current-error" class="text-xs text-red-300 break-words">—</p>
+      </div>
+    </div>
+    <div class="bg-slate-900 rounded-lg p-4 border border-slate-700">
+      <h3 class="font-bold text-white mb-3">نتيجة التحليل</h3>
+      <div id="current-analysis-result">
+        <p class="text-slate-500 text-sm">لا توجد نتيجة تحليل بعد</p>
+      </div>
+    </div>
+  </div>
+
   <!-- التحليل والقرارات -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
@@ -169,13 +216,14 @@ HTML = """<!DOCTYPE html>
           <tr class="text-slate-400 border-b border-slate-700 text-right">
             <th class="pb-3 font-medium">#</th>
             <th class="pb-3 font-medium">بدأت</th>
-            <th class="pb-3 font-medium">انتهت</th>
             <th class="pb-3 font-medium">الحالة</th>
+            <th class="pb-3 font-medium">التغريدات</th>
+            <th class="pb-3 font-medium">ملف التغريدات</th>
             <th class="pb-3 font-medium">الخطأ</th>
           </tr>
         </thead>
         <tbody id="cycles-body">
-          <tr><td colspan="5" class="text-slate-500 py-4 text-center">لا توجد دورات</td></tr>
+          <tr><td colspan="6" class="text-slate-500 py-4 text-center">لا توجد دورات</td></tr>
         </tbody>
       </table>
     </div>
@@ -184,7 +232,7 @@ HTML = """<!DOCTYPE html>
 </main>
 
 <script>
-const REFRESH = 30;
+const REFRESH = 10;
 let countdown = REFRESH;
 
 function fmtDt(dt) {
@@ -207,6 +255,21 @@ function sentimentAr(s) {
   return {bullish:'صاعد 📈', bearish:'هابط 📉', neutral:'محايد ➡️'}[s] || s || '—';
 }
 
+function statusAr(s) {
+  return {
+    collecting: 'جاري جمع التغريدات',
+    collected: 'تم جمع التغريدات',
+    analyzing: 'جاري تحليل التغريدات بواسطة Claude',
+    analyzed: 'تم التحليل',
+    collector_failed: 'فشل جمع التغريدات',
+    analyzer_failed: 'فشل التحليل',
+    no_new_tweets: 'لا توجد تغريدات جديدة',
+    running: 'تعمل',
+    completed: 'مكتملة',
+    failed: 'فاشلة'
+  }[s] || s || '—';
+}
+
 function actionBadge(a) {
   const map = {
     buy:  '<span class="px-2 py-0.5 rounded bg-green-900 text-green-300 font-bold">شراء</span>',
@@ -221,11 +284,70 @@ function statusBadge(s) {
     completed: '<span class="px-2 py-0.5 rounded bg-green-900  text-green-300  text-xs">مكتملة</span>',
     running:   '<span class="px-2 py-0.5 rounded bg-cyan-900   text-cyan-300   text-xs">تعمل</span>',
     failed:    '<span class="px-2 py-0.5 rounded bg-red-900    text-red-300    text-xs">فاشلة</span>',
+    collecting:'<span class="px-2 py-0.5 rounded bg-cyan-900   text-cyan-300   text-xs">جاري جمع التغريدات</span>',
+    collected: '<span class="px-2 py-0.5 rounded bg-blue-900   text-blue-300   text-xs">تم جمع التغريدات</span>',
+    analyzing: '<span class="px-2 py-0.5 rounded bg-purple-900 text-purple-300 text-xs">جاري تحليل التغريدات بواسطة Claude</span>',
+    analyzed:  '<span class="px-2 py-0.5 rounded bg-green-900  text-green-300  text-xs">تم التحليل</span>',
+    collector_failed: '<span class="px-2 py-0.5 rounded bg-red-900 text-red-300 text-xs">فشل جمع التغريدات</span>',
+    analyzer_failed:  '<span class="px-2 py-0.5 rounded bg-red-900 text-red-300 text-xs">فشل التحليل</span>',
+    no_new_tweets:    '<span class="px-2 py-0.5 rounded bg-slate-700 text-slate-300 text-xs">لا توجد تغريدات جديدة</span>',
     filled:    '<span class="px-2 py-0.5 rounded bg-green-900  text-green-300  text-xs">منفذة</span>',
     pending:   '<span class="px-2 py-0.5 rounded bg-yellow-900 text-yellow-300 text-xs">معلقة</span>',
     cancelled: '<span class="px-2 py-0.5 rounded bg-slate-700  text-slate-400  text-xs">ملغاة</span>',
   };
   return map[s] || `<span class="text-slate-400 text-xs">${s}</span>`;
+}
+
+function parseAnalysisResult(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return {summary: raw}; }
+}
+
+async function loadCurrentCycle() {
+  try {
+    const r = await fetch('/api/current-cycle');
+    const d = await r.json();
+    if (!d || d.error) return;
+
+    document.getElementById('current-cycle-id').textContent = d.cycle_id ? `#${d.cycle_id}` : '—';
+    document.getElementById('current-cycle-status').innerHTML = statusBadge(d.status);
+    document.getElementById('current-cycle-status-text').textContent = statusAr(d.status);
+    document.getElementById('current-collector-status').textContent = d.collector_status || '—';
+    document.getElementById('current-analyzer-status').textContent = d.analyzer_status || '—';
+    document.getElementById('current-tweets-count').textContent = d.tweets_count ?? 0;
+    document.getElementById('current-tweets-file').textContent = d.tweets_file_path || '—';
+    document.getElementById('current-error').textContent = d.error_message || '—';
+
+    const analysis = parseAnalysisResult(d.analysis_result);
+    const resultEl = document.getElementById('current-analysis-result');
+    if (!analysis) {
+      resultEl.innerHTML = '<p class="text-slate-500 text-sm">لا توجد نتيجة تحليل بعد</p>';
+    } else {
+      const signals = (analysis.strong_signals || []).slice(0, 6).map(sig =>
+        `<li class="text-sm text-slate-300"><span class="font-bold text-cyan-300">${sig.symbol || '—'}</span> ${sig.sentiment || ''}: ${sig.reason || ''}</li>`
+      ).join('');
+      const coins = (analysis.coins || []).slice(0, 10).map(c =>
+        `<span class="px-2 py-0.5 rounded bg-slate-700 text-xs ${sentimentClass(c.sentiment)}">${c.symbol || '—'} (${c.mentions || 0})</span>`
+      ).join(' ');
+      resultEl.innerHTML = `
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-lg font-bold ${sentimentClass(analysis.market_sentiment)}">${sentimentAr(analysis.market_sentiment)}</span>
+            <span class="text-sm font-mono text-slate-300">${analysis.confidence ?? 0}%</span>
+          </div>
+          <p class="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">${analysis.summary || analysis.reasoning || '—'}</p>
+          <div class="flex flex-wrap gap-1">${coins || '<span class="text-slate-500 text-xs">لا رموز</span>'}</div>
+          <ul class="list-disc list-inside space-y-1">${signals || '<li class="text-sm text-slate-500">لا إشارات قوية</li>'}</ul>
+          <p class="text-xs text-yellow-300">${analysis.trading_note || 'التداول الحقيقي معطل حاليًا.'}</p>
+        </div>
+      `;
+    }
+
+    if (['collecting', 'analyzing'].includes(d.status)) {
+      countdown = Math.min(countdown, 5);
+    }
+  } catch(e) { console.error('current cycle error', e); }
 }
 
 async function loadStats() {
@@ -347,16 +469,17 @@ async function loadCycles() {
     const d = await r.json();
     const tbody = document.getElementById('cycles-body');
     if (!d.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="text-slate-500 py-4 text-center">لا توجد دورات</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="text-slate-500 py-4 text-center">لا توجد دورات</td></tr>';
       return;
     }
     tbody.innerHTML = d.map(c => `
       <tr class="border-b border-slate-700">
-        <td class="py-3 text-slate-400 font-mono">#${c.id}</td>
+        <td class="py-3 text-slate-400 font-mono">#${c.cycle_id || c.id}</td>
         <td class="py-3 text-xs text-slate-300">${fmtDt(c.started_at)}</td>
-        <td class="py-3 text-xs text-slate-300">${fmtDt(c.completed_at)}</td>
         <td class="py-3">${statusBadge(c.status)}</td>
-        <td class="py-3 text-xs text-red-400">${c.error ? c.error.substring(0,60) : '—'}</td>
+        <td class="py-3 text-cyan-300 font-mono">${c.tweets_count ?? 0}</td>
+        <td class="py-3 text-xs text-slate-400 font-mono break-all">${c.tweets_file_path || '—'}</td>
+        <td class="py-3 text-xs text-red-400">${c.error_message ? c.error_message.substring(0,90) : '—'}</td>
       </tr>
     `).join('');
   } catch(e) { console.error('cycles error', e); }
@@ -379,7 +502,7 @@ async function loadBalance() {
 }
 
 async function refresh() {
-  await Promise.all([loadStats(), loadBalance(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles()]);
+  await Promise.all([loadStats(), loadBalance(), loadCurrentCycle(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles()]);
 }
 
 // تحديث تلقائي
@@ -411,6 +534,24 @@ def api_stats():
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/stats: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/current-cycle")
+def api_current_cycle():
+    try:
+        cycle = db.get_current_cycle()
+        if not cycle:
+            return JSONResponse({})
+        result = jsonable(dict(cycle))
+        if isinstance(result.get("analysis_result"), str) and result["analysis_result"]:
+            try:
+                result["analysis_result"] = json.loads(result["analysis_result"])
+            except json.JSONDecodeError:
+                pass
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error(f"[WebUI] خطأ في /api/current-cycle: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -510,17 +651,16 @@ def api_balance():
 @app.get("/api/cycles")
 def api_cycles():
     try:
-        with db.get_cursor() as cur:
-            cur.execute(
-                """SELECT id, started_at, completed_at, status, error
-                   FROM   cycles
-                   ORDER  BY started_at DESC
-                   LIMIT  15"""
-            )
-            rows = cur.fetchall()
+        rows = db.get_cycles(limit=15)
         result = []
         for r in rows:
-            result.append(jsonable(dict(r)))
+            item = jsonable(dict(r))
+            if isinstance(item.get("analysis_result"), str) and item["analysis_result"]:
+                try:
+                    item["analysis_result"] = json.loads(item["analysis_result"])
+                except json.JSONDecodeError:
+                    pass
+            result.append(item)
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/cycles: {e}")

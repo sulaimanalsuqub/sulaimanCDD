@@ -1,0 +1,15 @@
+.env
+x_cookies.json
+accounts.db
+*.db
+*.sqlite
+venv/
+__pycache__/
+*.pyc
+bot.log
+data/tweets/*.jsonl
+data/tweets/last_seen_tweets.json
+trading_bot/data/tweets/*.jsonl
+trading_bot/data/tweets/last_seen_tweets.json
+*.dump
+*.sql
