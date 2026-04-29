@@ -23,7 +23,7 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
 
 # ─── الثوابت ──────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL       = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+CLAUDE_MODEL       = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TWEETS_IN_PROMPT = int(os.getenv("MAX_TWEETS_IN_PROMPT", 200))  # حد أقصى لتجنب تجاوز context
 INTERVAL_MINUTES   = int(os.getenv("INTERVAL_MINUTES", 5))
 
