@@ -25,7 +25,7 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
            format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
 
 # ─── الثوابت ──────────────────────────────────────────────────────────────────
-INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", 5))
+INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", 60))
 
 
 def run_cycle() -> None:

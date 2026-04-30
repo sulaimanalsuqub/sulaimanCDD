@@ -27,7 +27,7 @@ DATA_DIR = BASE_DIR / "data" / "tweets"
 LAST_SEEN_FILE = DATA_DIR / "last_seen_tweets.json"
 
 SOCIALDATA_API_KEY = os.getenv("SOCIALDATA_API_KEY", "")
-TWEETS_PER_ACCOUNT = int(os.getenv("TWEETS_PER_ACCOUNT", 5))
+TWEETS_PER_ACCOUNT = int(os.getenv("TWEETS_PER_ACCOUNT", 1))
 SOCIALDATA_ACCOUNTS_PER_MINUTE = max(
     1,
     int(os.getenv("SOCIALDATA_ACCOUNTS_PER_MINUTE", 60)),

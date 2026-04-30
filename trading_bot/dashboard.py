@@ -29,7 +29,7 @@ logger.add(sys.stderr, format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {messag
            level="WARNING")
 
 REFRESH_INTERVAL = int(os.getenv("DASHBOARD_REFRESH", 30))  # ثانية
-INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", 5))
+INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", 60))
 
 console = Console()
 
