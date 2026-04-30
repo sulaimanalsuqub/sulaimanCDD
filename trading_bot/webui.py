@@ -274,6 +274,9 @@ function actionBadge(a) {
   const map = {
     buy:  '<span class="px-2 py-0.5 rounded bg-green-900 text-green-300 font-bold">شراء</span>',
     sell: '<span class="px-2 py-0.5 rounded bg-red-900  text-red-300  font-bold">بيع</span>',
+    watch: '<span class="px-2 py-0.5 rounded bg-cyan-900 text-cyan-300 font-bold">مراقبة</span>',
+    avoid: '<span class="px-2 py-0.5 rounded bg-orange-900 text-orange-300 font-bold">تجنب</span>',
+    no_trade: '<span class="px-2 py-0.5 rounded bg-slate-700 text-slate-300 font-bold">لا تداول</span>',
     hold: '<span class="px-2 py-0.5 rounded bg-slate-700 text-slate-300 font-bold">انتظار</span>',
   };
   return map[a] || a;
@@ -302,6 +305,32 @@ function parseAnalysisResult(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   try { return JSON.parse(raw); } catch { return {summary: raw}; }
+}
+
+function renderRecommendations(analysis) {
+  const recs = (analysis.recommendations || []).slice(0, 8);
+  if (!recs.length) {
+    return '<p class="text-sm text-slate-500">لا توجد توصيات واضحة</p>';
+  }
+  return '<div class="space-y-2">' + recs.map(r => {
+    const accounts = (r.supporting_accounts || r.accounts || []).slice(0, 4).join(', ');
+    const evidence = (r.evidence || []).slice(0, 2).map(e => `<li>${e}</li>`).join('');
+    return `
+      <div class="rounded-lg border border-slate-700 bg-slate-950 p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-cyan-300">${r.symbol || '—'}</span>
+            ${actionBadge(r.action || 'watch')}
+          </div>
+          <span class="text-xs font-mono text-slate-300">${r.confidence ?? 0}%</span>
+        </div>
+        <p class="text-sm text-slate-300 leading-relaxed">${r.reason || '—'}</p>
+        ${accounts ? `<p class="text-xs text-slate-500 mt-2">الحسابات: ${accounts}</p>` : ''}
+        ${evidence ? `<ul class="list-disc list-inside text-xs text-slate-400 mt-2 space-y-1">${evidence}</ul>` : ''}
+        ${r.risk ? `<p class="text-xs text-orange-300 mt-2">المخاطر: ${r.risk}</p>` : ''}
+      </div>
+    `;
+  }).join('') + '</div>';
 }
 
 async function loadCurrentCycle() {
@@ -337,6 +366,10 @@ async function loadCurrentCycle() {
             <span class="text-sm font-mono text-slate-300">${analysis.confidence ?? 0}%</span>
           </div>
           <p class="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">${analysis.summary || analysis.reasoning || '—'}</p>
+          <div>
+            <h4 class="font-bold text-white mb-2">توصيات Claude</h4>
+            ${renderRecommendations(analysis)}
+          </div>
           <div class="flex flex-wrap gap-1">${coins || '<span class="text-slate-500 text-xs">لا رموز</span>'}</div>
           <ul class="list-disc list-inside space-y-1">${signals || '<li class="text-sm text-slate-500">لا إشارات قوية</li>'}</ul>
           <p class="text-xs text-yellow-300">${analysis.trading_note || 'التداول الحقيقي معطل حاليًا.'}</p>
@@ -408,6 +441,10 @@ async function loadAnalysis() {
              style="width:${d.confidence}%"></div>
       </div>
       <p class="text-slate-400 text-xs mb-3 leading-relaxed">${(d.reasoning||'').substring(0,200)}${(d.reasoning||'').length>200?'...':''}</p>
+      <div class="mb-3">
+        <h3 class="text-sm font-bold text-white mb-2">توصيات Claude</h3>
+        ${renderRecommendations(d)}
+      </div>
       <div class="flex flex-wrap gap-1">${topCoins || '<span class="text-slate-500 text-xs">لا عملات</span>'}</div>
       <p class="text-slate-600 text-xs mt-3">${fmtDt(d.analyzed_at)}</p>
     `;
@@ -565,6 +602,22 @@ def api_analysis():
         # coins JSONB → list
         if isinstance(result.get("coins"), str):
             result["coins"] = json.loads(result["coins"])
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT analysis_result
+                   FROM cycles
+                   WHERE id = %s AND analysis_result IS NOT NULL
+                   LIMIT 1""",
+                (result.get("cycle_id"),),
+            )
+            cycle = cur.fetchone()
+        if cycle and cycle.get("analysis_result"):
+            try:
+                full = json.loads(cycle["analysis_result"])
+                if isinstance(full, dict):
+                    result.update(full)
+            except json.JSONDecodeError:
+                pass
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/analysis: {e}")

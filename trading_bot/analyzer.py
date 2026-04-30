@@ -36,7 +36,9 @@ SYSTEM_PROMPT = """\
 - تقييم المعنويات: bullish أو bearish أو neutral.
 - استخراج الإشارات القوية فقط.
 - ذكر الحسابات المؤثرة التي نشرت الإشارة.
-- عدم اقتراح صفقة إذا البيانات غير كافية.
+- إصدار توصيات نهائية مبنية على كل التغريدات: buy أو sell أو watch أو avoid أو no_trade.
+- لا تستخدم buy أو sell إلا إذا كانت الإشارة قوية ومسنودة من حسابات مؤثرة وتفاعل واضح.
+- إذا البيانات غير كافية، اجعل التوصية watch أو no_trade مع سبب واضح.
 - التذكير أن التداول الحقيقي معطل حاليًا.
 - اكتب JSON صالح فقط. لا تستخدم Markdown. لا تضع أسطر جديدة داخل قيم النصوص.
 
@@ -47,6 +49,18 @@ SYSTEM_PROMPT = """\
   "confidence": 55,
   "summary": "...",
   "strong_signals": [{"symbol": "BTC", "sentiment": "bullish", "accounts": ["..."], "reason": "..."}],
+  "recommendations": [
+    {
+      "symbol": "BTC",
+      "action": "watch",
+      "confidence": 55,
+      "timeframe": "short_term",
+      "reason": "...",
+      "supporting_accounts": ["..."],
+      "evidence": ["..."],
+      "risk": "..."
+    }
+  ],
   "influential_accounts": ["..."],
   "reasoning": "...",
   "trading_note": "التداول الحقيقي معطل حاليًا."
@@ -158,6 +172,7 @@ def parse_claude_response(raw: str) -> dict:
                 "confidence": 0,
                 "summary": raw[:1200],
                 "strong_signals": [],
+                "recommendations": [],
                 "influential_accounts": [],
                 "reasoning": "Claude أرجع JSON غير صالح، لذلك تم حفظ النص الخام بشكل مختصر.",
                 "trading_note": "التداول الحقيقي معطل حاليًا.",
@@ -174,12 +189,17 @@ def parse_claude_response(raw: str) -> dict:
     if not isinstance(coins, list):
         coins = []
 
+    recommendations = data.get("recommendations") or data.get("trade_recommendations") or []
+    if not isinstance(recommendations, list):
+        recommendations = []
+
     return {
         "market_sentiment": sentiment,
         "coins": coins,
         "confidence": confidence,
         "summary": data.get("summary") or "",
         "strong_signals": data.get("strong_signals") or [],
+        "recommendations": recommendations,
         "influential_accounts": data.get("influential_accounts") or [],
         "reasoning": data.get("reasoning") or "",
         "trading_note": data.get("trading_note") or "التداول الحقيقي معطل حاليًا.",
@@ -215,7 +235,8 @@ def combine_batch_results(results: list[dict]) -> dict:
 
     prompt = (
         "هذه تحليلات جزئية لدفعات تغريدات. ادمجها في تحليل نهائي واحد "
-        "بنفس صيغة JSON المطلوبة، واستخرج فقط الإشارات القوية:\n"
+        "بنفس صيغة JSON المطلوبة، واستخرج فقط الإشارات القوية والتوصيات النهائية. "
+        "لا تكرر توصيات ضعيفة، واجعل action = no_trade إذا لا توجد فرصة واضحة:\n"
         + json.dumps(results, ensure_ascii=False, default=_json_default)
     )
     return call_claude(prompt, max_tokens=1800)
