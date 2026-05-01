@@ -383,6 +383,19 @@ def get_latest_analysis() -> dict | None:
         return cur.fetchone()
 
 
+def get_analysis_for_cycle(cycle_id: int) -> dict | None:
+    """يجلب تحليل دورة محددة فقط حتى لا تُستخدم نتيجة دورة أخرى."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT * FROM analyses
+               WHERE cycle_id = %s
+               ORDER BY analyzed_at DESC
+               LIMIT 1""",
+            (cycle_id,),
+        )
+        return cur.fetchone()
+
+
 def get_current_cycle() -> dict | None:
     """يجلب آخر دورة بكل حقول حالة سير العمل."""
     with get_cursor() as cur:
@@ -395,6 +408,23 @@ def get_current_cycle() -> dict | None:
                FROM   cycles
                ORDER  BY started_at DESC
                LIMIT  1"""
+        )
+        return cur.fetchone()
+
+
+def get_cycle(cycle_id: int) -> dict | None:
+    """يجلب دورة محددة بكل حقول حالة سير العمل."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT id AS cycle_id, status, collector_status, analyzer_status,
+                      tweets_count, tweets_file_path, analysis_result,
+                      COALESCE(error_message, error) AS error_message,
+                      started_at, collected_at, analyzed_at, finished_at,
+                      completed_at
+               FROM   cycles
+               WHERE  id = %s
+               LIMIT  1""",
+            (cycle_id,),
         )
         return cur.fetchone()
 
@@ -443,6 +473,19 @@ def get_latest_decisions() -> list[dict]:
                    LIMIT  1
                )
                ORDER  BY d.confidence DESC"""
+        )
+        return cur.fetchall()
+
+
+def get_decisions_for_cycle(cycle_id: int) -> list[dict]:
+    """يجلب قرارات دورة محددة فقط."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT *
+               FROM   decisions
+               WHERE  cycle_id = %s
+               ORDER  BY confidence DESC""",
+            (cycle_id,),
         )
         return cur.fetchall()
 

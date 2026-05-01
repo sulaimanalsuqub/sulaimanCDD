@@ -27,6 +27,12 @@ BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
 MIN_CONFIDENCE     = int(os.getenv("MIN_CONFIDENCE", 60))
 TRADING_ENABLED    = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 PAPER_CAPITAL_USDT = float(os.getenv("PAPER_CAPITAL_USDT", "1000"))
+MIN_TRADE_CONFIDENCE = int(os.getenv("MIN_TRADE_CONFIDENCE", MIN_CONFIDENCE))
+MAX_TRADES_PER_CYCLE = max(1, int(os.getenv("MAX_TRADES_PER_CYCLE", 2)))
+MIN_TRADE_USDT = float(os.getenv("MIN_TRADE_USDT", "10"))
+MAX_TRADE_USDT = float(os.getenv("MAX_TRADE_USDT", "25"))
+TRADE_CAPITAL_PCT = float(os.getenv("TRADE_CAPITAL_PCT", "10"))
+ALLOW_SELL_ORDERS = os.getenv("ALLOW_SELL_ORDERS", "false").lower() == "true"
 
 # نسبة رأس المال لكل صفقة بحسب مستوى الثقة
 CAPITAL_TIERS = [
@@ -169,6 +175,86 @@ def make_decisions(cycle_id: int, analysis: dict, capital: float) -> list[dict]:
     return decisions
 
 
+def make_recommendation_decisions(
+    cycle_id: int,
+    analysis: dict,
+    capital: float,
+) -> list[dict]:
+    """ينشئ قرارات تنفيذ من recommendations القادمة من Claude."""
+    recommendations = analysis.get("recommendations") or []
+    if not recommendations:
+        logger.warning("[Decision] لا توجد recommendations في التحليل — لا قرارات")
+        return []
+
+    spend_cap = max(0.0, capital * (TRADE_CAPITAL_PCT / 100))
+    spend_cap = min(spend_cap, MAX_TRADE_USDT * MAX_TRADES_PER_CYCLE)
+    if spend_cap < MIN_TRADE_USDT:
+        logger.warning("[Decision] الرصيد المتاح لا يسمح بأي صفقة")
+        return []
+
+    eligible = []
+    passive = []
+    for rec in recommendations:
+        symbol = str(rec.get("symbol") or "").upper().replace("USDT", "")
+        action = str(rec.get("action") or "watch").lower()
+        confidence = int(rec.get("confidence") or analysis.get("confidence") or 0)
+        if not symbol:
+            continue
+
+        if action == "sell" and not ALLOW_SELL_ORDERS:
+            action = "hold"
+
+        if action in ("buy", "sell") and confidence >= MIN_TRADE_CONFIDENCE:
+            eligible.append({**rec, "symbol": symbol, "action": action, "confidence": confidence})
+        else:
+            passive.append({**rec, "symbol": symbol, "action": "hold", "confidence": confidence})
+
+    eligible = sorted(eligible, key=lambda item: int(item.get("confidence") or 0), reverse=True)
+    active = eligible[:MAX_TRADES_PER_CYCLE]
+    per_trade = round(min(MAX_TRADE_USDT, spend_cap / len(active)), 2) if active else 0.0
+    if active and per_trade < MIN_TRADE_USDT:
+        logger.warning(
+            f"[Decision] حجم الصفقة {per_trade:.2f} USDT أقل من الحد الأدنى "
+            f"{MIN_TRADE_USDT:.2f} — تحويل القرارات إلى hold"
+        )
+        passive = active + passive
+        active = []
+        per_trade = 0.0
+
+    decisions = []
+    for rec in active + passive[: max(0, MAX_TRADES_PER_CYCLE - len(active))]:
+        action = rec["action"] if rec in active else "hold"
+        amount = per_trade if action in ("buy", "sell") else 0.0
+        reason = rec.get("reason") or analysis.get("summary") or ""
+        risk = rec.get("risk") or ""
+        if risk:
+            reason = f"{reason} | المخاطر: {risk}"
+
+        decision_id = db.save_decision(
+            cycle_id=cycle_id,
+            coin=rec["symbol"],
+            action=action,
+            confidence=int(rec.get("confidence") or 0),
+            amount=amount,
+            reason=reason,
+        )
+        decision = {
+            "id": decision_id,
+            "coin": rec["symbol"],
+            "action": action,
+            "confidence": int(rec.get("confidence") or 0),
+            "amount": amount,
+            "reason": reason,
+        }
+        decisions.append(decision)
+        logger.info(
+            f"[Decision] {decision['coin']}: {action.upper()} | "
+            f"المبلغ: {amount:.2f} USDT | الثقة: {decision['confidence']}%"
+        )
+
+    return decisions
+
+
 def run(cycle_id: int) -> list[dict]:
     """
     نقطة الدخول المتزامنة — تُستدعى من scheduler.py.
@@ -176,9 +262,9 @@ def run(cycle_id: int) -> list[dict]:
     """
     logger.info(f"[Decision] بدء اتخاذ القرارات — الدورة #{cycle_id}")
 
-    analysis = db.get_latest_analysis()
+    analysis = db.get_analysis_for_cycle(cycle_id)
     if not analysis:
-        raise RuntimeError("لا يوجد تحليل محفوظ — شغّل analyzer.py أولاً")
+        raise RuntimeError(f"لا يوجد تحليل محفوظ للدورة #{cycle_id} — شغّل analyzer.py أولاً")
 
     if TRADING_ENABLED:
         try:
@@ -204,7 +290,20 @@ def run(cycle_id: int) -> list[dict]:
         coins = _json.loads(coins)
     analysis_dict["coins"] = coins
 
-    decisions = make_decisions(cycle_id, analysis_dict, capital)
+    try:
+        cycle = db.get_cycle(cycle_id)
+        raw_result = cycle.get("analysis_result") if cycle else None
+        if raw_result:
+            full_result = _json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+            if isinstance(full_result, dict):
+                analysis_dict.update(full_result)
+    except Exception as exc:
+        logger.warning(f"[Decision] تعذر قراءة analysis_result الكامل: {exc}")
+
+    if analysis_dict.get("recommendations"):
+        decisions = make_recommendation_decisions(cycle_id, analysis_dict, capital)
+    else:
+        decisions = make_decisions(cycle_id, analysis_dict, capital)
 
     active = [d for d in decisions if d["action"] != "hold"]
     logger.success(

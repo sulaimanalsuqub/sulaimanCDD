@@ -15,6 +15,8 @@ from loguru import logger
 import database as db
 import collector
 import analyzer
+import decision
+import trader
 
 load_dotenv()
 
@@ -33,9 +35,11 @@ def run_cycle() -> None:
     ينفذ دورة كاملة بالترتيب:
     1. Collector  → جمع التغريدات وحفظ JSONL
     2. Analyzer   → تحليل Claude API
+    3. Decision   → تحويل التوصيات إلى قرارات
+    4. Trader     → تنفيذ القرارات إذا TRADING_ENABLED=true
 
     إذا فشلت أي مرحلة → يُسجَّل الخطأ ويُكمل للدورة التالية.
-    لا ينفذ أي تداول حقيقي.
+    التنفيذ الحقيقي لا يحدث إلا إذا TRADING_ENABLED=true.
     """
     cycle_id = db.create_cycle()
     logger.info("=" * 60)
@@ -82,7 +86,36 @@ def run_cycle() -> None:
         )
         return
 
-    logger.success(f"اكتملت دورة الجمع والتحليل #{cycle_id} بنجاح ✓")
+    # ── المرحلة 3: القرارات ──────────────────────────────────────────────────
+    try:
+        decisions = decision.run(cycle_id)
+        logger.info(f"✓ المرحلة 3 (Decision) — قرارات: {len(decisions)}")
+    except Exception as e:
+        logger.error(f"✗ المرحلة 3 (Decision) فشلت: {e}")
+        db.update_cycle(
+            cycle_id,
+            status="decision_failed",
+            error_message=f"Decision: {e}",
+            mark_finished=True,
+        )
+        return
+
+    # ── المرحلة 4: التنفيذ ───────────────────────────────────────────────────
+    try:
+        trades = trader.run(cycle_id)
+        logger.info(f"✓ المرحلة 4 (Trader) — صفقات منفذة: {len(trades)}")
+        db.complete_cycle(cycle_id)
+    except Exception as e:
+        logger.error(f"✗ المرحلة 4 (Trader) فشلت: {e}")
+        db.update_cycle(
+            cycle_id,
+            status="trader_failed",
+            error_message=f"Trader: {e}",
+            mark_finished=True,
+        )
+        return
+
+    logger.success(f"اكتملت دورة التداول #{cycle_id} بنجاح ✓")
     logger.info("=" * 60)
 
 
