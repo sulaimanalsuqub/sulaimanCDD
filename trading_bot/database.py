@@ -175,14 +175,21 @@ CREATE TABLE IF NOT EXISTS trades (
     order_id    VARCHAR(50),
     status      VARCHAR(20)   NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'filled', 'failed', 'cancelled')),
-    pnl         NUMERIC(18,8) DEFAULT 0,    -- الربح/الخسارة لهذه الصفقة
-    executed_at TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    pnl               NUMERIC(18,8) DEFAULT 0,
+    oco_order_list_id BIGINT,
+    exit_price        NUMERIC(18,8),
+    exit_type         VARCHAR(10),
+    executed_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_cycle_id     ON trades (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_trades_executed_at  ON trades (executed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_coin         ON trades (coin);
 CREATE INDEX IF NOT EXISTS idx_trades_status       ON trades (status);
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS oco_order_list_id BIGINT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_price        NUMERIC(18,8);
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_type         VARCHAR(10);
 """
 
 
@@ -370,7 +377,6 @@ def save_cycle_analysis_result(cycle_id: int, result: dict) -> None:
         analyzer_status="completed",
         status="analyzed",
         mark_analyzed=True,
-        mark_finished=True,
     )
 
 
@@ -501,6 +507,40 @@ def save_trade(cycle_id: int, coin: str, action: str, amount: float,
             (cycle_id, coin, action, amount, price, order_id, status),
         )
         return cur.fetchone()["id"]
+
+
+def get_open_trades() -> list[dict]:
+    """يجلب الصفقات المفتوحة التي لها OCO ولم تُغلق بعد."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT id, coin, action, amount, price, oco_order_list_id
+               FROM   trades
+               WHERE  status = 'filled'
+                 AND  oco_order_list_id IS NOT NULL
+                 AND  exit_price IS NULL
+               ORDER  BY executed_at ASC"""
+        )
+        return cur.fetchall()
+
+
+def update_trade_oco(trade_id: int, oco_order_list_id: int) -> None:
+    """يحفظ orderListId الخاص بـ OCO في سجل الصفقة."""
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE trades SET oco_order_list_id = %s WHERE id = %s",
+            (oco_order_list_id, trade_id),
+        )
+
+
+def update_trade_exit(trade_id: int, exit_price: float, pnl: float, exit_type: str) -> None:
+    """يسجّل سعر الخروج والربح/الخسارة الفعلي للصفقة."""
+    with get_cursor() as cur:
+        cur.execute(
+            """UPDATE trades
+               SET exit_price = %s, pnl = %s, exit_type = %s
+               WHERE id = %s""",
+            (exit_price, pnl, exit_type, trade_id),
+        )
 
 
 def get_total_pnl() -> float:

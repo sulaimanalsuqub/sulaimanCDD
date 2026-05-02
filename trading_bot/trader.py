@@ -149,13 +149,12 @@ def place_order_with_retry(client: BinanceClient, symbol: str,
 
 def place_stop_loss_take_profit(client: BinanceClient, symbol: str,
                                 side: str, quantity: float,
-                                entry_price: float) -> None:
+                                entry_price: float) -> int | None:
     """
     يضع أوامر Stop Loss وTake Profit بعد تنفيذ الصفقة.
-    يعمل فقط في Spot عبر OCO orders.
+    يُعيد orderListId الخاص بـ OCO (Spot) أو None (Futures/فشل).
     """
     if USE_FUTURES:
-        # Futures: SL/TP عبر أوامر STOP_MARKET و TAKE_PROFIT_MARKET
         opposite_side = "SELL" if side == "BUY" else "BUY"
         sl_price = round(
             entry_price * (1 - STOP_LOSS_PCT / 100)
@@ -183,15 +182,15 @@ def place_stop_loss_take_profit(client: BinanceClient, symbol: str,
             logger.info(f"[Trader] SL/TP Futures: SL={sl_price} TP={tp_price}")
         except Exception as e:
             logger.warning(f"[Trader] تحذير: فشل وضع SL/TP: {e}")
+        return None
     else:
-        # Spot: OCO order
-        sl_price  = round(entry_price * (1 - STOP_LOSS_PCT   / 100), 2)
-        tp_price  = round(entry_price * (1 + TAKE_PROFIT_PCT / 100), 2)
-        sl_limit  = round(sl_price * 0.99, 2)   # هامش 1% تحت SL
+        sl_price = round(entry_price * (1 - STOP_LOSS_PCT   / 100), 2)
+        tp_price = round(entry_price * (1 + TAKE_PROFIT_PCT / 100), 2)
+        sl_limit = round(sl_price * 0.99, 2)
 
         if side == "BUY":
             try:
-                client.order_oco_sell(
+                oco = client.order_oco_sell(
                     symbol=symbol,
                     quantity=quantity,
                     price=str(tp_price),
@@ -199,9 +198,15 @@ def place_stop_loss_take_profit(client: BinanceClient, symbol: str,
                     stopLimitPrice=str(sl_limit),
                     stopLimitTimeInForce="GTC",
                 )
-                logger.info(f"[Trader] SL/TP Spot OCO: SL={sl_price} TP={tp_price}")
+                oco_list_id = oco.get("orderListId")
+                logger.info(
+                    f"[Trader] SL/TP Spot OCO: SL={sl_price} TP={tp_price} "
+                    f"| listId={oco_list_id}"
+                )
+                return oco_list_id
             except Exception as e:
                 logger.warning(f"[Trader] تحذير: فشل وضع OCO: {e}")
+        return None
 
 
 def execute_decision(client: BinanceClient, cycle_id: int,
@@ -264,9 +269,10 @@ def execute_decision(client: BinanceClient, cycle_id: int,
         status="filled",
     )
 
-    # وضع SL/TP
     if avg_price:
-        place_stop_loss_take_profit(client, symbol, side, quantity, avg_price)
+        oco_list_id = place_stop_loss_take_profit(client, symbol, side, quantity, avg_price)
+        if oco_list_id:
+            db.update_trade_oco(trade_id, oco_list_id)
 
     result = {
         "trade_id": trade_id,
@@ -282,6 +288,53 @@ def execute_decision(client: BinanceClient, cycle_id: int,
         f"السعر: {avg_price} | order_id: {order_id}"
     )
     return result
+
+
+def check_open_trades(client: BinanceClient) -> None:
+    """يفحص الصفقات المفتوحة ويحدّث PnL عند اكتمال OCO."""
+    open_trades = db.get_open_trades()
+    if not open_trades:
+        return
+
+    logger.info(f"[Trader] فحص {len(open_trades)} صفقة مفتوحة...")
+
+    for trade in open_trades:
+        trade_id     = int(trade["id"])
+        coin         = trade["coin"]
+        symbol       = get_symbol(coin)
+        entry_price  = float(trade["price"] or 0)
+        amount       = float(trade["amount"])
+        oco_list_id  = int(trade["oco_order_list_id"])
+
+        try:
+            order_list   = client.get_order_list(orderListId=oco_list_id)
+            list_status  = order_list.get("listOrderStatus", "")
+
+            if list_status != "ALL_DONE":
+                continue
+
+            exit_price = None
+            exit_type  = None
+
+            for order_ref in order_list.get("orders", []):
+                detail    = client.get_order(symbol=symbol, orderId=order_ref["orderId"])
+                if detail.get("status") == "FILLED":
+                    exec_qty   = float(detail.get("executedQty") or 1)
+                    cum_quote  = float(detail.get("cummulativeQuoteQty") or 0)
+                    exit_price = cum_quote / exec_qty if exec_qty > 0 else float(detail.get("price", 0))
+                    exit_type  = "tp" if detail.get("type") == "LIMIT_MAKER" else "sl"
+                    break
+
+            if exit_price and entry_price > 0:
+                pnl = round((exit_price - entry_price) / entry_price * amount, 4)
+                db.update_trade_exit(trade_id, exit_price, pnl, exit_type or "unknown")
+                logger.success(
+                    f"[Trader] {coin} مُغلق ({exit_type}) | "
+                    f"دخول: {entry_price:.4f} → خروج: {exit_price:.4f} | "
+                    f"PnL: {pnl:+.2f} USDT"
+                )
+        except Exception as e:
+            logger.warning(f"[Trader] تعذر فحص OCO للصفقة #{trade_id}: {e}")
 
 
 def run(cycle_id: int) -> list[dict]:

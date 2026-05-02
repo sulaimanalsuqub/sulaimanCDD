@@ -23,6 +23,17 @@ load_dotenv()
 BASE_DIR = Path(__file__).parent
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+_client: anthropic.Anthropic | None = None
+
+
+def get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY غير موجود في ملف .env")
+        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _client
 MAX_TWEETS_IN_PROMPT = int(os.getenv("MAX_TWEETS_IN_PROMPT", 50))
 MAX_TWEETS_FOR_ANALYSIS = int(os.getenv("MAX_TWEETS_FOR_ANALYSIS", 240))
 MAX_TWEET_TEXT_CHARS = int(os.getenv("MAX_TWEET_TEXT_CHARS", 240))
@@ -206,17 +217,20 @@ def parse_claude_response(raw: str) -> dict:
     }
 
 
-def call_claude(prompt: str, max_tokens: int = 1600) -> dict:
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY غير موجود في ملف .env")
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def call_claude(prompt: str, max_tokens: int = 2500) -> dict:
+    client = get_client()
     try:
         message = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=max_tokens,
             temperature=0,
-            system=SYSTEM_PROMPT,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
     except anthropic.APIConnectionError as e:
@@ -239,7 +253,7 @@ def combine_batch_results(results: list[dict]) -> dict:
         "لا تكرر توصيات ضعيفة، واجعل action = no_trade إذا لا توجد فرصة واضحة:\n"
         + json.dumps(results, ensure_ascii=False, default=_json_default)
     )
-    return call_claude(prompt, max_tokens=1800)
+    return call_claude(prompt, max_tokens=2500)
 
 
 def analyze_tweets(tweets: list[dict]) -> dict:

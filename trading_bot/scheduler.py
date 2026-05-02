@@ -41,6 +41,15 @@ def run_cycle() -> None:
     إذا فشلت أي مرحلة → يُسجَّل الخطأ ويُكمل للدورة التالية.
     التنفيذ الحقيقي لا يحدث إلا إذا TRADING_ENABLED=true.
     """
+    # ── فحص الصفقات المفتوحة من الدورات السابقة ──────────────────────────────
+    from trader import TRADING_ENABLED as _TRADING_ENABLED
+    if _TRADING_ENABLED:
+        try:
+            _client = trader.get_binance_client()
+            trader.check_open_trades(_client)
+        except Exception as _e:
+            logger.warning(f"[Scheduler] تعذر فحص الصفقات المفتوحة: {_e}")
+
     cycle_id = db.create_cycle()
     logger.info("=" * 60)
     logger.info(f"بدء الدورة #{cycle_id}")
