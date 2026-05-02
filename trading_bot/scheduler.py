@@ -16,6 +16,7 @@ import database as db
 import collector
 import analyzer
 import decision
+import scalper
 import trader
 
 load_dotenv()
@@ -119,6 +120,20 @@ def run_cycle() -> None:
     logger.info("=" * 60)
 
 
+def run_scalper_cycle() -> None:
+    """يشغل مضارب الدقيقة مع عزل أخطائه عن دورة جمع/تحليل التغريدات."""
+    try:
+        result = scalper.run()
+        if result.get("enabled"):
+            logger.info(
+                f"[Scalper] دورة دقيقة | opened={result.get('opened', 0)} "
+                f"closed={result.get('closed', 0)} "
+                f"interval={result.get('interval', scalper.SCALP_CANDLE_INTERVAL)}"
+            )
+    except Exception as exc:
+        logger.error(f"[Scalper] فشلت دورة المضاربة: {exc}")
+
+
 def on_job_event(event) -> None:
     """مستمع أحداث APScheduler للتسجيل."""
     if event.exception:
@@ -165,8 +180,24 @@ def main() -> None:
         misfire_grace_time=60,   # تجاهل إذا تأخر أكثر من 60 ثانية
     )
 
+    scheduler.add_job(
+        run_scalper_cycle,
+        trigger="interval",
+        minutes=scalper.SCALP_INTERVAL_MINUTES,
+        id="scalper_cycle",
+        name="مضارب الدقيقة",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+
     logger.info("تشغيل دورة أولى فورية...")
     run_cycle()   # دورة فورية عند البدء
+    logger.info(
+        f"مضارب الدقيقة مضبوط كل {scalper.SCALP_INTERVAL_MINUTES} دقيقة | "
+        f"شمعة {scalper.SCALP_CANDLE_INTERVAL} | enabled={scalper.SCALP_ENABLED}"
+    )
+    run_scalper_cycle()
 
     logger.info(f"المجدول يعمل — التالية بعد {INTERVAL_MINUTES} دقائق")
 

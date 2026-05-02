@@ -18,6 +18,7 @@ from binance.client import Client as BinanceClient
 from binance.exceptions import BinanceAPIException
 
 import database as db
+import ta_engine
 
 load_dotenv()
 
@@ -29,6 +30,18 @@ logger.add("bot.log", rotation="10 MB", retention="7 days",
 app = FastAPI(title="نظام التداول الذكي", docs_url=None, redoc_url=None)
 
 WEBUI_PORT = int(os.getenv("WEBUI_PORT", 8080))
+SCALP_SYMBOLS = [
+    item.strip().upper()
+    for item in os.getenv("SCALP_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+    if item.strip()
+]
+SCALP_CANDLE_INTERVAL = os.getenv("SCALP_CANDLE_INTERVAL", "1m")
+
+
+@app.on_event("startup")
+def startup_init_db():
+    if not db.init_db():
+        logger.error("[WebUI] تعذر تهيئة قاعدة البيانات عند بدء الواجهة")
 
 
 def jsonable(value):
@@ -84,7 +97,7 @@ HTML = """<!DOCTYPE html>
 <main class="p-6 space-y-6 max-w-7xl mx-auto">
 
   <!-- بطاقات الإحصائيات -->
-  <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+  <div class="grid grid-cols-2 md:grid-cols-6 gap-4">
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
       <p class="text-slate-400 text-sm mb-1">رصيد USDT</p>
       <p id="balance-usdt" class="text-2xl font-bold text-yellow-400">—</p>
@@ -99,6 +112,10 @@ HTML = """<!DOCTYPE html>
       <p id="stat-pnl" class="text-3xl font-bold">—</p>
     </div>
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+      <p class="text-slate-400 text-sm mb-1">ربح اليوم</p>
+      <p id="stat-daily-pnl" class="text-3xl font-bold">—</p>
+    </div>
+    <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
       <p class="text-slate-400 text-sm mb-1">تغريدات محللة</p>
       <p id="stat-tweets" class="text-3xl font-bold text-cyan-400">—</p>
     </div>
@@ -106,6 +123,26 @@ HTML = """<!DOCTYPE html>
       <p class="text-slate-400 text-sm mb-1">آخر دورة</p>
       <p id="stat-cycle" class="text-sm font-mono text-slate-300">—</p>
       <p id="stat-cycle-status" class="text-xs mt-1">—</p>
+    </div>
+  </div>
+
+  <!-- TradingView والتحليل الفني -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="lg:col-span-2 bg-slate-800 rounded-xl p-5 border border-slate-700">
+      <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+        <span>📈</span> TradingView
+      </h2>
+      <div class="tradingview-widget-container">
+        <div id="tradingview_chart" style="height:420px"></div>
+      </div>
+    </div>
+    <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+      <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+        <span>🧭</span> TA Panel
+      </h2>
+      <div id="ta-content" class="space-y-2">
+        <p class="text-slate-500 text-sm">جارٍ تحميل المؤشرات...</p>
+      </div>
     </div>
   </div>
 
@@ -231,9 +268,29 @@ HTML = """<!DOCTYPE html>
 
 </main>
 
+<script src="https://s3.tradingview.com/tv.js"></script>
 <script>
 const REFRESH = 10;
 let countdown = REFRESH;
+
+function initTradingView() {
+  if (!window.TradingView || document.getElementById('tradingview_chart').dataset.loaded) return;
+  document.getElementById('tradingview_chart').dataset.loaded = '1';
+  new TradingView.widget({
+    autosize: true,
+    symbol: 'BINANCE:BTCUSDT',
+    interval: '1',
+    timezone: 'Etc/UTC',
+    theme: 'dark',
+    style: '1',
+    locale: 'ar_AE',
+    toolbar_bg: '#0f172a',
+    enable_publishing: false,
+    hide_side_toolbar: false,
+    allow_symbol_change: true,
+    container_id: 'tradingview_chart'
+  });
+}
 
 function fmtDt(dt) {
   if (!dt) return '—';
@@ -399,6 +456,11 @@ async function loadStats() {
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' $';
     pnlEl.className = 'text-3xl font-bold ' + (pnl >= 0 ? 'text-green-400' : 'text-red-400');
 
+    const dailyPnl = parseFloat(d.daily_pnl || 0);
+    const dailyEl = document.getElementById('stat-daily-pnl');
+    dailyEl.textContent = (dailyPnl >= 0 ? '+' : '') + dailyPnl.toFixed(2) + ' $';
+    dailyEl.className = 'text-3xl font-bold ' + (dailyPnl >= 0 ? 'text-green-400' : 'text-red-400');
+
     document.getElementById('stat-tweets').textContent = d.recent_tweets ?? '0';
     document.getElementById('stat-cycle').textContent  = fmtDt(d.last_cycle);
 
@@ -542,8 +604,43 @@ async function loadBalance() {
   } catch(e) { console.error('balance error', e); }
 }
 
+async function loadTA() {
+  try {
+    const r = await fetch('/api/ta');
+    const d = await r.json();
+    const el = document.getElementById('ta-content');
+    if (!Array.isArray(d) || !d.length) {
+      el.innerHTML = '<p class="text-slate-500 text-sm">لا توجد قراءات TA</p>';
+      return;
+    }
+    el.innerHTML = d.map(item => {
+      const signal = item.signal || 'hold';
+      const cls = signal === 'buy' ? 'text-green-300 bg-green-950' : signal === 'sell' ? 'text-red-300 bg-red-950' : 'text-slate-300 bg-slate-700';
+      const rsi = Number(item.rsi || 0);
+      return `
+        <div class="rounded-lg border border-slate-700 bg-slate-950 p-3">
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <span class="font-bold text-cyan-300">${item.symbol}</span>
+            <span class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${signal}</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-xs text-slate-400">
+            <span>السعر: <b class="text-slate-200">${Number(item.price || 0).toFixed(4)}</b></span>
+            <span>RSI: <b class="${rsi > 70 ? 'text-red-300' : rsi < 30 ? 'text-green-300' : 'text-slate-200'}">${rsi.toFixed(2)}</b></span>
+            <span>EMA 9: <b class="text-slate-200">${Number(item.ema_fast || 0).toFixed(4)}</b></span>
+            <span>EMA 21: <b class="text-slate-200">${Number(item.ema_slow || 0).toFixed(4)}</b></span>
+            <span>MACD: <b class="text-slate-200">${Number(item.macd || 0).toFixed(5)}</b></span>
+            <span>ثقة: <b class="text-slate-200">${item.confidence ?? 0}%</b></span>
+          </div>
+          <p class="text-[11px] text-slate-600 mt-2">${item.candle_interval || item.interval || '1m'} | ${item.cached ? 'cache' : 'live'}</p>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error('ta error', e); }
+}
+
 async function refresh() {
-  await Promise.all([loadStats(), loadBalance(), loadCurrentCycle(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles()]);
+  initTradingView();
+  await Promise.all([loadStats(), loadBalance(), loadCurrentCycle(), loadAnalysis(), loadDecisions(), loadTrades(), loadCycles(), loadTA()]);
 }
 
 // تحديث تلقائي
@@ -658,6 +755,37 @@ def api_trades():
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"[WebUI] خطأ في /api/trades: {e}")
+        return JSONResponse([], status_code=500)
+
+
+@app.get("/api/scalp-positions")
+def api_scalp_positions():
+    try:
+        rows = db.get_recent_scalp_positions(limit=20)
+        return JSONResponse([jsonable(dict(row)) for row in rows])
+    except Exception as e:
+        logger.error(f"[WebUI] خطأ في /api/scalp-positions: {e}")
+        return JSONResponse([], status_code=500)
+
+
+@app.get("/api/ta")
+def api_ta():
+    try:
+        snapshots = []
+        try:
+            snapshots = ta_engine.get_market_snapshot(SCALP_SYMBOLS, SCALP_CANDLE_INTERVAL)
+            for snapshot in snapshots:
+                try:
+                    db.save_ta_snapshot(snapshot)
+                except Exception as exc:
+                    logger.warning(f"[WebUI] تعذر حفظ TA snapshot: {exc}")
+        except Exception as exc:
+            logger.warning(f"[WebUI] تعذر جلب TA مباشر، استخدام آخر محفوظ: {exc}")
+            snapshots = db.get_latest_ta_snapshots(limit=20)
+
+        return JSONResponse([jsonable(dict(item)) for item in snapshots])
+    except Exception as e:
+        logger.error(f"[WebUI] خطأ في /api/ta: {e}")
         return JSONResponse([], status_code=500)
 
 

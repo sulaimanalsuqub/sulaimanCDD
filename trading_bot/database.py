@@ -183,6 +183,60 @@ CREATE INDEX IF NOT EXISTS idx_trades_cycle_id     ON trades (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_trades_executed_at  ON trades (executed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_coin         ON trades (coin);
 CREATE INDEX IF NOT EXISTS idx_trades_status       ON trades (status);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- جدول صفقات المضاربة: مراكز قصيرة المدى مع TP/SL/Trailing
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS scalp_positions (
+    id             SERIAL PRIMARY KEY,
+    symbol         VARCHAR(20)   NOT NULL,
+    side           VARCHAR(5)    NOT NULL CHECK (side IN ('long', 'short')),
+    quantity       NUMERIC(24,10) NOT NULL DEFAULT 0,
+    amount_usdt    NUMERIC(18,8) NOT NULL DEFAULT 0,
+    entry_price    NUMERIC(18,8) NOT NULL,
+    stop_loss      NUMERIC(18,8) NOT NULL,
+    take_profit    NUMERIC(18,8) NOT NULL,
+    trailing_stop  NUMERIC(18,8),
+    highest_price  NUMERIC(18,8),
+    lowest_price   NUMERIC(18,8),
+    status         VARCHAR(10)   NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open', 'closed', 'failed')),
+    mode           VARCHAR(10)   NOT NULL DEFAULT 'paper'
+                    CHECK (mode IN ('paper', 'live')),
+    open_order_id  VARCHAR(80),
+    close_order_id VARCHAR(80),
+    opened_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    closed_at      TIMESTAMPTZ,
+    close_price    NUMERIC(18,8),
+    close_reason   VARCHAR(30),
+    pnl            NUMERIC(18,8) DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scalp_positions_status
+    ON scalp_positions (status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scalp_positions_symbol
+    ON scalp_positions (symbol, opened_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- آخر قراءات التحليل الفني المستخدمة في الداشبورد
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ta_snapshots (
+    id             BIGSERIAL PRIMARY KEY,
+    symbol         VARCHAR(20) NOT NULL,
+    candle_interval VARCHAR(10) NOT NULL,
+    price          NUMERIC(18,8),
+    rsi            NUMERIC(10,4),
+    ema_fast       NUMERIC(18,8),
+    ema_slow       NUMERIC(18,8),
+    macd           NUMERIC(18,8),
+    macd_signal    NUMERIC(18,8),
+    signal         VARCHAR(10),
+    confidence     SMALLINT,
+    captured_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ta_snapshots_latest
+    ON ta_snapshots (symbol, candle_interval, captured_at DESC);
 """
 
 
@@ -506,7 +560,32 @@ def save_trade(cycle_id: int, coin: str, action: str, amount: float,
 def get_total_pnl() -> float:
     """يحسب إجمالي الربح/الخسارة من جميع الصفقات."""
     with get_cursor() as cur:
-        cur.execute("SELECT COALESCE(SUM(pnl), 0) AS total FROM trades WHERE status = 'filled'")
+        cur.execute(
+            """SELECT
+                   COALESCE((SELECT SUM(pnl) FROM trades WHERE status = 'filled'), 0)
+                 + COALESCE((SELECT SUM(pnl) FROM scalp_positions WHERE status = 'closed'), 0)
+                 AS total"""
+        )
+        return float(cur.fetchone()["total"])
+
+
+def get_daily_pnl() -> float:
+    """يحسب ربح/خسارة اليوم الحالي حسب توقيت قاعدة البيانات."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT
+                   COALESCE((
+                       SELECT SUM(pnl)
+                       FROM trades
+                       WHERE status = 'filled' AND executed_at >= CURRENT_DATE
+                   ), 0)
+                 + COALESCE((
+                       SELECT SUM(pnl)
+                       FROM scalp_positions
+                       WHERE status = 'closed' AND closed_at >= CURRENT_DATE
+                   ), 0)
+                 AS total"""
+        )
         return float(cur.fetchone()["total"])
 
 
@@ -518,11 +597,163 @@ def get_stats() -> dict:
                 (SELECT COALESCE(tweets_count, 0)
                  FROM cycles ORDER BY started_at DESC LIMIT 1) AS recent_tweets,
                 (SELECT COUNT(*) FROM trades WHERE status = 'filled')  AS total_trades,
-                (SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'filled') AS total_pnl,
+                (
+                    COALESCE((SELECT SUM(pnl) FROM trades WHERE status = 'filled'), 0)
+                  + COALESCE((SELECT SUM(pnl) FROM scalp_positions WHERE status = 'closed'), 0)
+                ) AS total_pnl,
+                (
+                    COALESCE((
+                        SELECT SUM(pnl) FROM trades
+                        WHERE status = 'filled' AND executed_at >= CURRENT_DATE
+                    ), 0)
+                  + COALESCE((
+                        SELECT SUM(pnl) FROM scalp_positions
+                        WHERE status = 'closed' AND closed_at >= CURRENT_DATE
+                    ), 0)
+                ) AS daily_pnl,
                 (SELECT started_at FROM cycles ORDER BY started_at DESC LIMIT 1) AS last_cycle,
                 (SELECT status    FROM cycles ORDER BY started_at DESC LIMIT 1) AS last_status
         """)
         return dict(cur.fetchone())
+
+
+def get_open_scalp_positions() -> list[dict]:
+    """يجلب مراكز المضاربة المفتوحة."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT *
+               FROM scalp_positions
+               WHERE status = 'open'
+               ORDER BY opened_at ASC"""
+        )
+        return cur.fetchall()
+
+
+def get_recent_scalp_positions(limit: int = 20) -> list[dict]:
+    """يجلب آخر مراكز المضاربة للعرض."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT *
+               FROM scalp_positions
+               ORDER BY opened_at DESC
+               LIMIT %s""",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def get_last_scalp_opened_at():
+    """آخر وقت فتح صفقة مضاربة، لمنع أكثر من صفقة جديدة في الدقيقة."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT opened_at
+               FROM scalp_positions
+               WHERE status IN ('open', 'closed')
+               ORDER BY opened_at DESC
+               LIMIT 1"""
+        )
+        row = cur.fetchone()
+        return row["opened_at"] if row else None
+
+
+def save_scalp_position(
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+    amount_usdt: float,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    trailing_stop: float | None,
+    mode: str,
+    open_order_id: str | None = None,
+) -> int:
+    """يحفظ مركز مضاربة جديداً."""
+    with get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO scalp_positions (
+                   symbol, side, quantity, amount_usdt, entry_price,
+                   stop_loss, take_profit, trailing_stop, highest_price,
+                   lowest_price, mode, open_order_id
+               )
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (
+                symbol, side, quantity, amount_usdt, entry_price,
+                stop_loss, take_profit, trailing_stop, entry_price,
+                entry_price, mode, open_order_id,
+            ),
+        )
+        return cur.fetchone()["id"]
+
+
+def update_scalp_position(position_id: int, **fields) -> None:
+    """يحدث مركز مضاربة بحقول محدودة ومعروفة فقط."""
+    allowed = {
+        "stop_loss", "take_profit", "trailing_stop", "highest_price",
+        "lowest_price", "status", "closed_at", "close_price",
+        "close_reason", "pnl", "close_order_id",
+    }
+    assignments = []
+    values = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"حقل غير مسموح في scalp_positions: {key}")
+        if key == "closed_at" and value == "NOW()":
+            assignments.append("closed_at = NOW()")
+            continue
+        assignments.append(f"{key} = %s")
+        values.append(value)
+
+    if not assignments:
+        return
+
+    values.append(position_id)
+    with get_cursor() as cur:
+        cur.execute(
+            f"UPDATE scalp_positions SET {', '.join(assignments)} WHERE id = %s",
+            tuple(values),
+        )
+
+
+def save_ta_snapshot(snapshot: dict) -> None:
+    """يحفظ آخر قراءة TA لاستخدامها في لوحة الويب."""
+    with get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ta_snapshots (
+                   symbol, candle_interval, price, rsi, ema_fast, ema_slow,
+                   macd, macd_signal, signal, confidence
+               )
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                snapshot.get("symbol"),
+                snapshot.get("interval"),
+                snapshot.get("price"),
+                snapshot.get("rsi"),
+                snapshot.get("ema_fast"),
+                snapshot.get("ema_slow"),
+                snapshot.get("macd"),
+                snapshot.get("macd_signal"),
+                snapshot.get("signal"),
+                snapshot.get("confidence"),
+            ),
+        )
+
+
+def get_latest_ta_snapshots(limit: int = 20) -> list[dict]:
+    """يجلب أحدث قراءة واحدة لكل رمز وفاصل."""
+    with get_cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (symbol, candle_interval)
+                      symbol, candle_interval, price, rsi, ema_fast, ema_slow,
+                      macd, macd_signal, signal, confidence, captured_at
+               FROM ta_snapshots
+               ORDER BY symbol, candle_interval, captured_at DESC
+               LIMIT %s""",
+            (limit,),
+        )
+        return cur.fetchall()
 
 
 def close_pool() -> None:
