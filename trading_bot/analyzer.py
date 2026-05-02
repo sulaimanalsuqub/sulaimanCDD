@@ -28,42 +28,45 @@ MAX_TWEETS_FOR_ANALYSIS = int(os.getenv("MAX_TWEETS_FOR_ANALYSIS", 240))
 MAX_TWEET_TEXT_CHARS = int(os.getenv("MAX_TWEET_TEXT_CHARS", 240))
 
 SYSTEM_PROMPT = """\
-أنت محلل سوق كريبتو متخصص. حلل تغريدات حسابات X المرسلة لك.
+أنت محلل أسواق كريبتو خبير. ستُعطى تغريدات من حسابات مؤثرة في مجال التشفير.
 
-المطلوب:
-- تلخيص أهم الأخبار والإشارات من الحسابات.
-- تحديد العملات أو الرموز المذكورة.
-- تقييم المعنويات: bullish أو bearish أو neutral.
-- استخراج الإشارات القوية فقط.
-- ذكر الحسابات المؤثرة التي نشرت الإشارة.
-- إصدار توصيات نهائية مبنية على كل التغريدات: buy أو sell أو watch أو avoid أو no_trade.
-- لا تستخدم buy أو sell إلا إذا كانت الإشارة قوية ومسنودة من حسابات مؤثرة وتفاعل واضح.
-- إذا البيانات غير كافية، اجعل التوصية watch أو no_trade مع سبب واضح.
-- التذكير أن التداول الحقيقي معطل حاليًا.
-- اكتب JSON صالح فقط. لا تستخدم Markdown. لا تضع أسطر جديدة داخل قيم النصوص.
+مهمتك:
+- تحليل التغريدات واستخراج الإشارات الحقيقية من الضجيج.
+- تحديد العملات المذكورة وتقييم معنوياتها.
+- إصدار توصيات تداول واضحة: buy أو sell أو watch أو avoid أو no_trade.
+- لا تستخدم buy أو sell إلا إذا كانت الإشارة قوية ومتعددة المصادر.
+- ذكر الحسابات الداعمة لكل توصية.
 
-أجب بصيغة JSON فقط بدون Markdown:
+قواعد الإخراج الصارمة:
+- أجب بـ JSON فقط — لا Markdown، لا نص خارج الـ JSON.
+- لا أسطر جديدة داخل قيم النصوص، استخدم مسافة بدلاً منها.
+- لا تختصر الـ JSON، اكملها بالكامل.
+
+أجب بهذا الشكل الدقيق:
 {
-  "market_sentiment": "neutral",
-  "coins": [{"symbol": "BTC", "sentiment": "neutral", "mentions": 1}],
-  "confidence": 55,
-  "summary": "...",
-  "strong_signals": [{"symbol": "BTC", "sentiment": "bullish", "accounts": ["..."], "reason": "..."}],
+  "market_sentiment": "bullish",
+  "confidence": 75,
+  "summary": "ملخص السوق في جملة واحدة",
+  "reasoning": "تفسير مفصل للتحليل",
+  "coins": [
+    {"symbol": "BTC", "sentiment": "bullish", "mentions": 12}
+  ],
+  "strong_signals": [
+    {"symbol": "BTC", "sentiment": "bullish", "accounts": ["elonmusk"], "reason": "سبب الإشارة"}
+  ],
   "recommendations": [
     {
       "symbol": "BTC",
-      "action": "watch",
-      "confidence": 55,
+      "action": "buy",
+      "confidence": 80,
       "timeframe": "short_term",
-      "reason": "...",
-      "supporting_accounts": ["..."],
-      "evidence": ["..."],
-      "risk": "..."
+      "reason": "سبب التوصية",
+      "supporting_accounts": ["account1", "account2"],
+      "evidence": ["دليل 1", "دليل 2"],
+      "risk": "المخاطر المحتملة"
     }
   ],
-  "influential_accounts": ["..."],
-  "reasoning": "...",
-  "trading_note": "التداول الحقيقي معطل حاليًا."
+  "influential_accounts": ["account1", "account2"]
 }"""
 
 
@@ -82,8 +85,13 @@ def load_tweets_file(path: str | Path) -> list[dict]:
 
     tweets = []
     for line in file_path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+        line = line.strip()
+        if not line:
+            continue
+        try:
             tweets.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.warning(f"تم تخطي سطر JSONL تالف: {line[:80]}")
     return tweets
 
 
@@ -112,8 +120,7 @@ def select_tweets_for_analysis(tweets: list[dict]) -> list[dict]:
     )
     selected = ranked[:limit]
     logger.info(
-        f"[Analyzer] تقليل التغريدات للتحليل: {len(tweets)} -> {len(selected)} "
-        "لتقليل استهلاك Claude"
+        f"[Analyzer] تقليل التغريدات: {len(tweets)} -> {len(selected)}"
     )
     return sorted(
         selected,
@@ -133,50 +140,72 @@ def build_prompt(tweets: list[dict], *, batch_number: int | None = None) -> str:
         if len(text) > MAX_TWEET_TEXT_CHARS:
             text = text[:MAX_TWEET_TEXT_CHARS].rstrip() + "..."
         created_at = tweet.get("created_at") or tweet.get("tweet_created_at") or ""
-        url = tweet.get("url") or tweet.get("tweet_url") or ""
         metrics = (
             f"likes={tweet.get('likes', 0)}, "
-            f"retweets={tweet.get('retweets', 0)}, "
-            f"replies={tweet.get('replies', 0)}, "
+            f"rt={tweet.get('retweets', 0)}, "
             f"views={tweet.get('views', 0)}"
         )
-        lines.append(f"{index}. @{account} | {created_at} | {metrics} | {url}\n{text}")
+        lines.append(f"{index}. @{account} | {created_at} | {metrics}\n{text}")
     return "\n".join(lines)
 
 
-def parse_claude_response(raw: str) -> dict:
+def _try_parse_json(raw: str) -> dict | None:
+    """يحاول تحليل JSON بطرق متعددة."""
     raw = raw.strip()
+
+    # إزالة Markdown code blocks
     if raw.startswith("```"):
         raw = "\n".join(
             line for line in raw.splitlines()
             if not line.strip().startswith("```")
         ).strip()
 
+    # محاولة مباشرة
     try:
-        data = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                data = None
-        else:
-            data = None
+        pass
 
-        if data is None:
-            logger.warning("Claude أرجع نصًا غير صالح كـ JSON، سيتم حفظ ملخص آمن بدل إسقاط الدورة")
-            return {
-                "market_sentiment": "neutral",
-                "coins": [],
-                "confidence": 0,
-                "summary": raw[:1200],
-                "strong_signals": [],
-                "recommendations": [],
-                "influential_accounts": [],
-                "reasoning": "Claude أرجع JSON غير صالح، لذلك تم حفظ النص الخام بشكل مختصر.",
-                "trading_note": "التداول الحقيقي معطل حاليًا.",
-            }
+    # بحث عن JSON كامل
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # محاولة إصلاح JSON مقطوع: أضف إغلاق الأقواس
+    for _ in range(5):
+        raw = raw.rstrip().rstrip(",")
+        for close in ["}", "]}", "}]}", "}]}}", "}]}}}"]:
+            try:
+                return json.loads(raw + close)
+            except json.JSONDecodeError:
+                pass
+        # قطع آخر سطر غير مكتمل وحاول مجدداً
+        lines = raw.rsplit("\n", 1)
+        if len(lines) < 2:
+            break
+        raw = lines[0]
+
+    return None
+
+
+def parse_claude_response(raw: str) -> dict:
+    data = _try_parse_json(raw)
+
+    if data is None:
+        logger.warning("[Analyzer] Claude أرجع JSON غير صالح — حفظ ملخص آمن")
+        return {
+            "market_sentiment": "neutral",
+            "coins": [],
+            "confidence": 0,
+            "summary": raw[:500].replace("\n", " "),
+            "strong_signals": [],
+            "recommendations": [],
+            "influential_accounts": [],
+            "reasoning": "فشل تحليل JSON من Claude.",
+        }
 
     sentiment = str(data.get("market_sentiment", "neutral")).lower()
     if sentiment not in ("bullish", "bearish", "neutral"):
@@ -197,22 +226,21 @@ def parse_claude_response(raw: str) -> dict:
         "market_sentiment": sentiment,
         "coins": coins,
         "confidence": confidence,
-        "summary": data.get("summary") or "",
+        "summary": str(data.get("summary") or ""),
         "strong_signals": data.get("strong_signals") or [],
         "recommendations": recommendations,
         "influential_accounts": data.get("influential_accounts") or [],
-        "reasoning": data.get("reasoning") or "",
-        "trading_note": data.get("trading_note") or "التداول الحقيقي معطل حاليًا.",
+        "reasoning": str(data.get("reasoning") or data.get("summary") or ""),
     }
 
 
-def call_claude(prompt: str, max_tokens: int = 1600) -> dict:
+def call_claude(prompt: str, max_tokens: int = 4096) -> dict:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY غير موجود في ملف .env")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     try:
-        message = client.messages.create(
+        message = anthropic_client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=max_tokens,
             temperature=0,
@@ -234,12 +262,11 @@ def combine_batch_results(results: list[dict]) -> dict:
         return results[0]
 
     prompt = (
-        "هذه تحليلات جزئية لدفعات تغريدات. ادمجها في تحليل نهائي واحد "
-        "بنفس صيغة JSON المطلوبة، واستخرج فقط الإشارات القوية والتوصيات النهائية. "
-        "لا تكرر توصيات ضعيفة، واجعل action = no_trade إذا لا توجد فرصة واضحة:\n"
+        "هذه تحليلات جزئية. ادمجها في تحليل نهائي واحد بنفس صيغة JSON، "
+        "واستخرج أفضل التوصيات فقط. أجب بـ JSON فقط بدون نص إضافي:\n"
         + json.dumps(results, ensure_ascii=False, default=_json_default)
     )
-    return call_claude(prompt, max_tokens=1800)
+    return call_claude(prompt, max_tokens=4096)
 
 
 def analyze_tweets(tweets: list[dict]) -> dict:
@@ -256,7 +283,13 @@ def analyze_tweets(tweets: list[dict]) -> dict:
     partial_results = []
     for index, batch in enumerate(batches, 1):
         prompt = build_prompt(batch, batch_number=index)
-        partial_results.append(call_claude(prompt))
+        result = call_claude(prompt)
+        partial_results.append(result)
+        logger.info(
+            f"[Analyzer] دفعة {index}/{len(batches)}: "
+            f"{result.get('market_sentiment')} | ثقة {result.get('confidence')}% | "
+            f"توصيات: {len(result.get('recommendations', []))}"
+        )
 
     final = combine_batch_results(partial_results)
     final["tweets_collected"] = len(tweets)
@@ -306,15 +339,17 @@ def run(cycle_id: int, tweets_file_path: str | None = None) -> dict:
 
     logger.success(
         f"[Analyzer] انتهى — التوجه: {result['market_sentiment']} | "
-        f"الثقة: {result['confidence']}% | ID التحليل: #{result['analysis_id']}"
+        f"الثقة: {result['confidence']}% | "
+        f"توصيات: {len(result.get('recommendations', []))} | "
+        f"ID: #{result['analysis_id']}"
     )
     return result
 
 
 if __name__ == "__main__":
-    logger.info("═" * 60)
+    logger.info("=" * 60)
     logger.info("تشغيل analyzer.py للاختبار المستقل")
-    logger.info("═" * 60)
+    logger.info("=" * 60)
 
     db.init_db()
     cycle = db.get_current_cycle()

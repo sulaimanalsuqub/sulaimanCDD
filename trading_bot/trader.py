@@ -293,7 +293,8 @@ def run(cycle_id: int) -> list[dict]:
 
     decisions = db.get_decisions_for_cycle(cycle_id)
     if not decisions:
-        raise RuntimeError(f"لا توجد قرارات محفوظة للدورة #{cycle_id} — شغّل decision.py أولاً")
+        logger.info(f"[Trader] لا توجد قرارات للدورة #{cycle_id} — لا صفقات")
+        return []
 
     active = [d for d in decisions if d["action"] in ("buy", "sell")]
     if not active:

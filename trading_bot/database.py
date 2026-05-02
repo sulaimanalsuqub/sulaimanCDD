@@ -183,6 +183,31 @@ CREATE INDEX IF NOT EXISTS idx_trades_cycle_id     ON trades (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_trades_executed_at  ON trades (executed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_coin         ON trades (coin);
 CREATE INDEX IF NOT EXISTS idx_trades_status       ON trades (status);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- جدول صفقات المضاربة السريعة
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS scalp_positions (
+    id            SERIAL PRIMARY KEY,
+    symbol        VARCHAR(20)   NOT NULL,
+    entry_price   NUMERIC(18,8) NOT NULL,
+    quantity      NUMERIC(18,8) NOT NULL,
+    tp_price      NUMERIC(18,8) NOT NULL,
+    sl_price      NUMERIC(18,8) NOT NULL,
+    amount_usdt   NUMERIC(18,8) NOT NULL,
+    status        VARCHAR(10)   NOT NULL DEFAULT 'open',
+    buy_order_id  VARCHAR(50),
+    exit_price    NUMERIC(18,8),
+    pnl           NUMERIC(18,8),
+    close_reason  VARCHAR(10),
+    opened_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    closed_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_scalp_status    ON scalp_positions (status);
+CREATE INDEX IF NOT EXISTS idx_scalp_symbol    ON scalp_positions (symbol);
+CREATE INDEX IF NOT EXISTS idx_scalp_opened_at ON scalp_positions (opened_at DESC);
+
 """
 
 
@@ -518,9 +543,51 @@ def get_stats() -> dict:
                 (SELECT COALESCE(tweets_count, 0)
                  FROM cycles ORDER BY started_at DESC LIMIT 1) AS recent_tweets,
                 (SELECT COUNT(*) FROM trades WHERE status = 'filled')  AS total_trades,
-                (SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'filled') AS total_pnl,
+                (SELECT COALESCE(SUM(pnl), 0) FROM scalp_positions WHERE status='closed') AS total_pnl,
+                (SELECT COALESCE(SUM(pnl), 0) FROM scalp_positions
+                 WHERE status='closed'
+                   AND closed_at >= CURRENT_DATE AT TIME ZONE 'Asia/Riyadh') AS daily_pnl,
+                (SELECT COUNT(*) FROM scalp_positions WHERE status='closed'
+                   AND closed_at >= CURRENT_DATE AT TIME ZONE 'Asia/Riyadh') AS daily_trades,
+                (SELECT COUNT(*) FROM scalp_positions WHERE status='open') AS open_positions,
                 (SELECT started_at FROM cycles ORDER BY started_at DESC LIMIT 1) AS last_cycle,
                 (SELECT status    FROM cycles ORDER BY started_at DESC LIMIT 1) AS last_status
+        """)
+        return dict(cur.fetchone())
+
+
+
+def get_scalp_positions(status: str | None = None, limit: int = 30) -> list[dict]:
+    """يجلب صفقات المضاربة."""
+    with get_cursor() as cur:
+        if status:
+            cur.execute(
+                "SELECT * FROM scalp_positions WHERE status=%s ORDER BY opened_at DESC LIMIT %s",
+                (status, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM scalp_positions ORDER BY opened_at DESC LIMIT %s",
+                (limit,),
+            )
+        return cur.fetchall()
+
+
+def get_scalp_stats() -> dict:
+    """إحصائيات المضاربة."""
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE status='open') AS open_count,
+                COUNT(*) FILTER (WHERE status='closed' AND close_reason <> 'phantom') AS total_closed,
+                COUNT(*) FILTER (WHERE status='closed' AND pnl > 0) AS wins,
+                COUNT(*) FILTER (WHERE status='closed' AND pnl < 0) AS losses,
+                COALESCE(SUM(pnl) FILTER (WHERE status='closed' AND close_reason <> 'phantom'), 0) AS total_pnl,
+                COALESCE(SUM(pnl) FILTER (
+                    WHERE status='closed' AND close_reason <> 'phantom'
+                    AND closed_at >= CURRENT_DATE AT TIME ZONE 'Asia/Riyadh'
+                ), 0) AS daily_pnl
+            FROM scalp_positions
         """)
         return dict(cur.fetchone())
 
